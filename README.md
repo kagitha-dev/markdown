@@ -15,7 +15,12 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
 - Outline that follows your scroll position
 - Preview and Source views
 - Light, dark and system themes
-- Print / save as PDF and download as HTML
+- **Export menu**
+  - PDF via the print dialog (Ctrl/Cmd+P), always light, with link URLs printed and a sensible file name
+  - Standalone HTML: one file with fonts, math and diagrams embedded, works offline, follows the reader's light/dark setting
+  - Markdown: download the original `.md`
+  - Copy as formatted text (for Google Docs, Word or email) or copy the raw Markdown
+  - Optional frontmatter table at the top of PDF, HTML and formatted-text exports
 - Raw HTML is sanitized, so scripts and `javascript:` links are removed
 - The last document and theme are remembered in the browser
 
@@ -57,6 +62,8 @@ src/
   App.tsx               toolbar, layout, file loading, outline, diagrams
   markdown.ts           unified pipeline, frontmatter parsing, Shiki setup
   frontmatter-card.tsx  metadata card and YAML error view
+  export.ts             HTML/Markdown export, font inlining, rich-text copy
+  export-menu.tsx       the Export dropdown
   sample.ts             the welcome document
   index.css             all styles (Tailwind v4 base + custom)
   katex.css             KaTeX styles trimmed to woff2 fonts

@@ -8,6 +8,12 @@ const paths: Record<string, string> = {
   download: 'M12 3v12M7 10l5 5 5-5M4 20h16',
   panel: 'M4 5h16v14H4zM14 5v14',
   close: 'M6 6l12 12M18 6L6 18',
+  pdf: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M9 13h6M9 17h4',
+  code: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M10.5 12.5 8.5 14.5l2 2M13.5 12.5l2 2-2 2',
+  md: 'M3 6h18v12H3zM6.5 15V9l2.5 3 2.5-3v6M16.5 9v6M14.5 13l2 2 2-2',
+  copy: 'M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1zM5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1',
+  rich: 'M4 6h16M4 10h10M4 14h16M4 18h8',
+  chevron: 'M6 9l6 6 6-6',
 }
 export function Icon({ name }: { name: string }) {
   return (

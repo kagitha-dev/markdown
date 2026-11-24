@@ -3,6 +3,8 @@ import { docStats, extractFrontmatter, highlightSource, renderMarkdown } from '.
 import { FrontmatterCard } from './frontmatter-card'
 import { SAMPLE, SAMPLE_NAME } from './sample'
 import { Icon } from './icons'
+import { baseName, buildStandaloneHtml, copyRich, downloadBlob, escapeHtml, metaHtml } from './export'
+import { ExportMenu } from './export-menu'
 
 type Theme = 'system' | 'light' | 'dark'
 type View = 'preview' | 'source'
@@ -92,6 +94,8 @@ export default function App() {
   const [dragging, setDragging] = useState(false)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [toast, setToast] = useState<{ msg: string; undo?: Doc } | null>(null)
+  const [includeFm, setIncludeFm] = useState(() => store.get<boolean>('kmv.exportFm', true))
+  const [busy, setBusy] = useState(false)
 
   const dark = useResolvedDark(theme)
   const articleRef = useRef<HTMLElement>(null)
@@ -282,10 +286,12 @@ export default function App() {
   }, [readFile])
 
   /* keyboard shortcuts */
+  const exportPdfRef = useRef<() => void>(() => {})
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
       if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); fileRef.current?.click() }
+      else if (mod && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); exportPdfRef.current() }
       else if (mod && e.shiftKey && e.key.toLowerCase() === 'v') { e.preventDefault(); setPasteOpen(true) }
       else if (e.key === 'Escape') { setDrawer(false); setPasteOpen(false) }
     }
@@ -298,16 +304,65 @@ export default function App() {
   const cycleTheme = () => setTheme((t) => (t === 'system' ? 'light' : t === 'light' ? 'dark' : 'system'))
   const themeLabel = theme === 'system' ? 'Theme: system' : theme === 'light' ? 'Theme: light' : 'Theme: dark'
 
-  const downloadHtml = () => {
-    const css = Array.from(document.styleSheets)
-      .flatMap((sh) => { try { return Array.from(sh.cssRules).map((r) => r.cssText) } catch { return [] } })
-      .join('\n')
-    const page = `<!DOCTYPE html><html lang="en" class="${dark ? 'dark' : ''}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>${css}</style></head><body class="export"><main class="reading"><article class="prose">${articleRef.current?.innerHTML ?? html}</article></main></body></html>`
-    const url = URL.createObjectURL(new Blob([page], { type: 'text/html' }))
-    const a = document.createElement('a')
-    a.href = url; a.download = doc.name.replace(/\.[^.]+$/, '') + '.html'; a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 2000)
-  }
+  /* ---------- export ---------- */
+  useEffect(() => { store.set('kmv.exportFm', includeFm) }, [includeFm])
+  const hasFm = !!fm?.data && Object.keys(fm.data).length > 0
+  const meta = includeFm && hasFm ? metaHtml(fm!.data) : ''
+  const fileBase = baseName(typeof fm?.data?.title === 'string' ? fm.data.title : '', doc.name)
+  const description = typeof fm?.data?.description === 'string' ? fm.data.description : undefined
+
+  /** Make sure the rendered article is on screen before exporting it. */
+  const ensurePreview = useCallback(async () => {
+    if (view !== 'preview') { setView('preview'); await new Promise((r) => setTimeout(r, 350)) }
+    return articleRef.current
+  }, [view])
+
+  const exportPdf = useCallback(async () => {
+    await ensurePreview()
+    const prevTitle = document.title
+    document.title = fileBase // browsers use this as the PDF file name
+    document.body.classList.toggle('print-fm', includeFm && hasFm)
+    const restore = () => {
+      document.title = prevTitle
+      document.body.classList.remove('print-fm')
+      window.removeEventListener('afterprint', restore)
+    }
+    window.addEventListener('afterprint', restore)
+    try { window.print() } catch { restore(); setToast({ msg: 'Printing is blocked here. Open markdown.kagitha.com to save a PDF.' }) }
+  }, [ensurePreview, fileBase, includeFm, hasFm])
+
+  const exportHtml = useCallback(async () => {
+    const art = await ensurePreview()
+    if (!art) return
+    setBusy(true)
+    try {
+      const page = await buildStandaloneHtml({ article: art, title, description, meta })
+      downloadBlob(new Blob([page], { type: 'text/html;charset=utf-8' }), fileBase + '.html')
+      setToast({ msg: `Saved ${fileBase}.html` })
+    } catch (e) {
+      setToast({ msg: 'Could not build the HTML file: ' + String((e as Error)?.message ?? e) })
+    } finally { setBusy(false) }
+  }, [ensurePreview, title, description, meta, fileBase])
+
+  const exportMd = useCallback(() => {
+    const name = /\.(md|markdown)$/i.test(doc.name) && doc.name !== 'pasted.md' ? doc.name : fileBase + '.md'
+    downloadBlob(new Blob([doc.text], { type: 'text/markdown;charset=utf-8' }), name)
+    setToast({ msg: `Saved ${name}` })
+  }, [doc, fileBase])
+
+  const copyFormatted = useCallback(async () => {
+    const art = await ensurePreview()
+    if (!art) return
+    try { await copyRich(art, meta); setToast({ msg: 'Copied. Paste into Google Docs, Word or an email.' }) }
+    catch { setToast({ msg: 'Copying was blocked by the browser.' }) }
+  }, [ensurePreview, meta])
+
+  const copyMarkdown = useCallback(async () => {
+    try { await navigator.clipboard.writeText(doc.text); setToast({ msg: 'Markdown copied' }) }
+    catch { setToast({ msg: 'Copying was blocked by the browser.' }) }
+  }, [doc.text])
+
+  exportPdfRef.current = exportPdf
 
   const sidebar = (
     <>
@@ -369,16 +424,18 @@ export default function App() {
           <button type="button" className="btn btn--icon" onClick={cycleTheme} title={themeLabel} aria-label={themeLabel}>
             <Icon name={theme === 'system' ? 'auto' : theme === 'light' ? 'sun' : 'moon'} />
           </button>
-          {isTopWindow && (
-            <>
-              <button type="button" className="btn btn--icon hide-sm" onClick={() => window.print()} title="Print or save as PDF" aria-label="Print or save as PDF">
-                <Icon name="print" />
-              </button>
-              <button type="button" className="btn btn--icon hide-sm" onClick={downloadHtml} title="Download as HTML" aria-label="Download as HTML">
-                <Icon name="download" />
-              </button>
-            </>
-          )}
+          <ExportMenu
+            canDownload={isTopWindow}
+            busy={busy}
+            hasFm={hasFm}
+            includeFm={includeFm}
+            onIncludeFm={setIncludeFm}
+            onPdf={exportPdf}
+            onHtml={exportHtml}
+            onMd={exportMd}
+            onCopyRich={copyFormatted}
+            onCopyMd={copyMarkdown}
+          />
           <button type="button" className="btn btn--icon show-md" onClick={() => setDrawer(true)} aria-label="Show details and outline">
             <Icon name="panel" />
           </button>
@@ -394,6 +451,9 @@ export default function App() {
 
         <div className="main" ref={mainRef}>
           <main className="reading">
+            {view === 'preview' && hasFm && (
+              <div className="print-meta" dangerouslySetInnerHTML={{ __html: metaHtml(fm!.data) }} />
+            )}
             {view === 'preview' ? (
               <article
                 ref={articleRef}
@@ -479,8 +539,4 @@ function PasteDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (t:
       </form>
     </div>
   )
-}
-
-function escapeHtml(s: string) {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 }
