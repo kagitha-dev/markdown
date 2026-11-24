@@ -212,12 +212,47 @@ export default function App() {
   /* loading files */
   const docRef = useRef(doc)
   docRef.current = doc
-  const replaceDoc = useCallback((next: Doc, msg: string) => {
-    setToast({ msg, undo: docRef.current })
+  const isHome = doc.name === SAMPLE_NAME && doc.text === SAMPLE
+  const lastFileRef = useRef<Doc | null>(isHome ? null : doc)
+
+  const showDoc = useCallback((next: Doc) => {
     setDoc(next)
     setView('preview')
+    setDrawer(false)
     mainRef.current?.scrollTo({ top: 0 })
   }, [])
+
+  /* Opening a file adds one history entry, so the browser's Back button returns home. */
+  const replaceDoc = useCallback((next: Doc, msg: string) => {
+    setToast({ msg, undo: docRef.current })
+    lastFileRef.current = next
+    try {
+      if (history.state?.kmvFile) history.replaceState({ kmvFile: true }, '')
+      else history.pushState({ kmvFile: true }, '')
+    } catch { /* history unavailable in some embedded viewers */ }
+    showDoc(next)
+  }, [showDoc])
+
+  const goHome = useCallback(() => {
+    if (docRef.current.name === SAMPLE_NAME && docRef.current.text === SAMPLE) {
+      mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
+    setToast(null)
+    try { if (history.state?.kmvFile) { history.back(); return } } catch { /* fall through */ }
+    showDoc({ name: SAMPLE_NAME, text: SAMPLE })
+  }, [showDoc])
+
+  useEffect(() => {
+    // A file restored from the last visit still gets a Back-to-home entry.
+    try { if (!isHome && !history.state?.kmvFile) history.pushState({ kmvFile: true }, '') } catch { /* ignore */ }
+    const onPop = (e: PopStateEvent) => {
+      if (e.state?.kmvFile) { if (lastFileRef.current) showDoc(lastFileRef.current) }
+      else showDoc({ name: SAMPLE_NAME, text: SAMPLE })
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const readFile = useCallback(async (f: File) => {
     const isText = /\.(md|markdown|mdown|mkd|mdx|txt)$/i.test(f.name) || f.type.startsWith('text/')
@@ -310,10 +345,15 @@ export default function App() {
         <div className="brand">
           <a className="brand-home" href="https://kagitha.com" target="_blank" rel="noopener">kagitha</a>
           <span className="brand-sep" aria-hidden="true">/</span>
-          <span className="brand-name">Markdown Viewer</span>
+          <button type="button" className="brand-name" onClick={goHome} title="Home">Markdown Viewer</button>
         </div>
         <div className="file" title={doc.name}>
           <span className="file-name">{doc.name}</span>
+          {!isHome && (
+            <button type="button" className="file-close" onClick={goHome} title="Close file and go home" aria-label={`Close ${doc.name}`}>
+              <Icon name="close" />
+            </button>
+          )}
         </div>
         <div className="actions">
           <button type="button" className="btn btn--primary" onClick={() => fileRef.current?.click()} title="Open a file (Ctrl+O)">
@@ -404,7 +444,7 @@ export default function App() {
         <div className="toast" role="status">
           <span>{toast.msg}</span>
           {toast.undo && (
-            <button type="button" onClick={() => { setDoc(toast.undo!); setToast(null) }}>Undo</button>
+            <button type="button" onClick={() => { const prev = toast.undo!; setToast(null); if (prev.name === SAMPLE_NAME && prev.text === SAMPLE) goHome(); else { lastFileRef.current = prev; showDoc(prev) } }}>Undo</button>
           )}
           <button type="button" aria-label="Dismiss" onClick={() => setToast(null)}><Icon name="close" /></button>
         </div>
