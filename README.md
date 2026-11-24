@@ -1,6 +1,8 @@
-# Quire
+# kagitha Markdown Viewer
 
-A private Markdown viewer that runs entirely in the browser. Files are never uploaded.
+A free, private Markdown viewer that runs entirely in the browser: **https://markdown.kagitha.com**
+
+Files are opened in your browser and never uploaded. Fonts, the code highlighter and the diagram renderer are bundled with the app, so it makes no third-party requests.
 
 ## Features (v1)
 
@@ -8,7 +10,7 @@ A private Markdown viewer that runs entirely in the browser. Files are never upl
 - GitHub Flavored Markdown: tables, task lists, strikethrough, footnotes, autolinks
 - Code highlighting (Shiki, 20+ languages) with copy buttons
 - Math with KaTeX (`$inline$`, `$$block$$`)
-- Mermaid diagrams (loaded from jsDelivr only when a file contains one)
+- Mermaid diagrams (bundled, loaded only when a file contains one)
 - YAML frontmatter card, with errors reported by line and an OKF `type` badge
 - Outline that follows your scroll position
 - Preview and Source views
@@ -33,6 +35,12 @@ npm run dev
 
 Or deploy from the command line: `npm i -g vercel && vercel --prod`.
 
+### Custom domain
+
+1. In the Vercel project, open **Settings → Domains** and add `markdown.kagitha.com` and `md.kagitha.com`.
+2. At your DNS provider, add a CNAME record for each: `markdown → cname.vercel-dns.com` and `md → cname.vercel-dns.com`.
+3. `vercel.json` already redirects `md.kagitha.com` to `markdown.kagitha.com`. HTTPS is set up automatically.
+
 ## Scripts
 
 | Command | What it does |
@@ -44,6 +52,7 @@ Or deploy from the command line: `npm i -g vercel && vercel --prod`.
 ## Project layout
 
 ```
+public/               og.png (social preview), robots.txt, sitemap.xml
 src/
   App.tsx               toolbar, layout, file loading, outline, diagrams
   markdown.ts           unified pipeline, frontmatter parsing, Shiki setup
