@@ -11,7 +11,6 @@ export function countVisit() {
   const today = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD in the visitor's time zone
   try {
     if (localStorage.getItem(KEY) === today) return
-    localStorage.setItem(KEY, today)
   } catch {
     return // storage blocked: skip rather than count every page load
   }
@@ -22,5 +21,13 @@ export function countVisit() {
     mode: 'cors',
     credentials: 'omit',
     keepalive: true,
-  }).catch(() => {})
+  })
+    .then((res) => {
+      // Mark today as counted only once kagitha.com has accepted the visit, so a failed
+      // attempt (offline, server not deployed yet, blocked) is retried on the next load.
+      if (res.ok) {
+        try { localStorage.setItem(KEY, today) } catch {}
+      }
+    })
+    .catch(() => {})
 }
