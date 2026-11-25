@@ -15,7 +15,7 @@ related:
 
 # Free online Markdown viewer
 
-Open a \`.md\` file and read it as a clean, formatted page. Your file is **opened in your browser and never uploaded**: there is no server, no account and no tracking.
+Open a \`.md\` file and read it as a clean, formatted page. Your file is **opened in your browser and never uploaded**: there is no account, no cookies, and nothing about your files leaves your browser.
 
 > **Try it:** drop a \`.md\` file onto this window, press **Open**, or paste Markdown with **Paste**. To read a whole set of notes, open a **Folder** or a \`.zip\` file.
 
@@ -102,7 +102,7 @@ flowchart LR
 
 ## Privacy
 
-Everything happens in your browser. Folders are read straight from your disk and nothing is copied anywhere. The fonts, the code highlighter and the diagram renderer are all served from this site, so opening a file makes no requests to anyone else. You can check this in your browser's developer tools, on the Network tab.
+Everything happens in your browser. Folders are read straight from your disk and nothing is copied anywhere. The fonts, the code highlighter and the diagram renderer are all served from this site, so opening a file makes no requests to anyone else. The only other request is an anonymous visit count to kagitha.com, at most once a day: it sends the word \"markdown\" and nothing else, no cookies, file names or contents. You can check all of this in your browser's developer tools, on the Network tab.
 
 ## Notes
 

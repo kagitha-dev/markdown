@@ -2,7 +2,7 @@
 
 A free, private Markdown viewer that runs entirely in the browser: **https://markdown.kagitha.com**
 
-Files are opened in your browser and never uploaded. Fonts, the code highlighter and the diagram renderer are bundled with the app, so it makes no third-party requests.
+Files are opened in your browser and never uploaded. Fonts, the code highlighter and the diagram renderer are bundled with the app, so it makes no third-party requests. The only network call is an anonymous once-a-day visit count to `kagitha.com/api/app-visit` (sends `{"app":"markdown"}`, no cookies, nothing about files), shown on kagitha.com's private stats page.
 
 ## Features
 
