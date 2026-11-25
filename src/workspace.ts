@@ -16,6 +16,8 @@ export interface Workspace {
   handle?: FileSystemDirectoryHandle
   /** Markdown files, sorted by path. */
   docs: string[]
+  /** Where the files came from, when not a folder on disk. */
+  source?: 'zip'
   /** True when the folder had more than MAX_FILES files and only the first were read. */
   truncated: boolean
 }
@@ -106,6 +108,20 @@ export function fromFileList(list: FileList | File[]): Workspace | null {
   return finish(root, files)
 }
 
+/* ---------- any list of paths (used for .zip archives) ---------- */
+
+export function workspaceFromEntries(name: string, entries: { path: string; get: () => Promise<File> }[]): Workspace {
+  const files = new Map<string, WsFile>()
+  for (const e of entries) {
+    const parts = e.path.split('/')
+    const file = parts[parts.length - 1]
+    if (!file || parts.slice(0, -1).some(skipDir) || file.startsWith('.')) continue
+    if (files.size >= MAX_FILES) break
+    files.set(e.path, { path: e.path, name: file, kind: kindOf(file), get: e.get })
+  }
+  return finish(name, files)
+}
+
 /* ---------- drag and drop of a folder ---------- */
 
 export async function fromDroppedEntry(rootEntry: FileSystemDirectoryEntry): Promise<Workspace> {
@@ -169,6 +185,21 @@ export function findFile(ws: Workspace, path: string): WsFile | null {
     if (f) return f
   }
   return get(dir + 'index.md') ?? get(dir + 'README.md') ?? get(dir + 'readme.md')
+}
+
+/**
+ * Resolve a link to a file in the folder. OKF bundles of v0.2 or earlier may also resolve
+ * paths from the bundle root, so `rootFallback` tries that when the relative path misses.
+ */
+export function resolveLink(ws: Workspace, fromPath: string, href: string, rootFallback = false): { target: string | null; file: WsFile | null } {
+  const target = resolvePath(fromPath, href)
+  const file = target !== null ? findFile(ws, target) : null
+  if (!file && rootFallback && !href.startsWith('/') && dirOf(fromPath)) {
+    const alt = resolvePath('', href)
+    const f2 = alt !== null ? findFile(ws, alt) : null
+    if (f2) return { target: alt, file: f2 }
+  }
+  return { target, file }
 }
 
 /** The file to show first when a folder opens. */

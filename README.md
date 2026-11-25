@@ -12,6 +12,13 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
   - Links between files work (`../other.md#heading`, folder links, links without `.md`), and Back/Forward move between files
   - Images with relative paths are shown from the folder (and embedded in HTML exports)
   - Search across every file (Ctrl/Cmd+K) with MiniSearch, matches highlighted in the page
+- **Open Knowledge Format (OKF) bundles**, from a folder or a `.zip` (JSZip). Follows OKF v0.3 (Nov 2026) with the v0.2 fallbacks.
+  - Detected from `okf_version` in the root `index.md`, or when most files have a `type`
+  - **Contents** tab built from the `index.md` files; bundle title, description and license shown
+  - **Checks** tab (validator, Zod): unreadable frontmatter, missing `type`, bad `status`, bad dates, `generated` without `by`, `sources` without `resource`, Attested Computations without `runtime`, reserved file names, `log.md` date headings, broken links and path fields, stale concepts, out-of-date verifications, unverified and deprecated notes. Click a problem to open the file; broken links are highlighted in the page.
+  - Status, trust tier and freshness in the frontmatter card; "Linked from" (backlinks) for the open file
+  - **Graph** view (Cytoscape.js) of links between files, coloured by `type`, for the whole folder or near the open file
+  - **Filters** by type, status, tag, trust tier, freshness and date changed; they apply to the file list, search and the graph
 - **Recent files and folders** on the home page, kept in IndexedDB in your browser only. Folders opened in Chrome or Edge can be reopened in one click.
 - **Installable app that works offline** (service worker via vite-plugin-pwa). Installed in Chrome or Edge, it can open `.md` files from the desktop.
 - GitHub Flavored Markdown: tables, task lists, strikethrough, footnotes, autolinks
@@ -72,8 +79,14 @@ src/
   frontmatter.ts        YAML frontmatter parsing and word count
   workspace.ts          opened folders: reading, path resolution, image blob URLs
   file-tree.tsx         the folder tree
-  side-panels.tsx       folder panel (tree + search results) and Recent panel
-  search.ts             MiniSearch index across a folder (loaded on demand)
+  side-panels.tsx       folder panel (contents, files, checks, filters, search), links panel, Recent panel
+  search.ts             MiniSearch index
+  scan.ts               reads a folder once, then builds the index and the OKF analysis (loaded on demand)
+  okf.ts                OKF detection, index.md navigation, links/backlinks and the validator (Zod)
+  okf-core.ts           trust tier, staleness and status from one file's frontmatter
+  filters.ts            frontmatter filters
+  graph-view.tsx        the link graph (Cytoscape.js, loaded on demand)
+  zip.ts                opening .zip bundles (JSZip, loaded on demand)
   recent.ts             recent files and folders in IndexedDB
   frontmatter-card.tsx  metadata card and YAML error view
   export.ts             HTML/Markdown export, font inlining, rich-text copy
@@ -85,4 +98,6 @@ src/
 
 ## Next
 
-- v3: OKF bundle validator, graph view, frontmatter filters, open .zip bundles
+- Split view to edit and preview (CodeMirror 6)
+- Export a bundle as a static website
+- Share links (needs a backend)

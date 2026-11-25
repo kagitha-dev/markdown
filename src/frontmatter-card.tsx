@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { FmValue, Frontmatter } from './frontmatter'
+import { okfSignals, relDate, TIER_LABEL } from './okf-core'
 
 const OKF_HINT = 'OKF uses `type` as its one required field'
 
@@ -46,6 +47,29 @@ function Value({ v }: { v: FmValue }) {
       </a>
     )
   return <span>{v}</span>
+}
+
+/** Status, trust tier and freshness, derived the way the OKF spec defines them. */
+function OkfSignals({ data }: { data: Record<string, FmValue> }) {
+  const s = okfSignals(data)
+  const hasTrust = 'verified' in data || 'generated' in data
+  const rows: [string, React.ReactNode, string?][] = []
+  if (s.status || s.badStatus) rows.push(['Status', s.badStatus ? `${s.badStatus} (not a defined status)` : s.status, s.status === 'deprecated' ? 'warn' : s.status === 'draft' ? 'muted' : 'ok'])
+  if (hasTrust || s.tier !== 'unverified')
+    rows.push(['Trust', <>{TIER_LABEL[s.tier]}{s.lastVerified ? <span className="sig-sub">verified {relDate(s.lastVerified)}</span> : null}</>, s.tier === 'human' ? 'ok' : s.tier === 'outdated' ? 'warn' : 'muted'])
+  if (s.staleAfter) rows.push([s.stale ? 'Stale' : 'Fresh until', s.stale ? <>since {relDate(s.staleAfter)}</> : relDate(s.staleAfter), s.stale ? 'warn' : 'ok'])
+  if (s.supersededBy) rows.push(['Replaced by', <code>{s.supersededBy}</code>, 'warn'])
+  if (!rows.length) return null
+  return (
+    <dl className="signals">
+      {rows.map(([k, v, tone]) => (
+        <div key={k} className={'sig sig--' + (tone ?? 'muted')}>
+          <dt>{k}</dt>
+          <dd>{v}</dd>
+        </div>
+      ))}
+    </dl>
+  )
 }
 
 export function FrontmatterCard({ fm }: { fm: Frontmatter | null }) {
@@ -107,10 +131,13 @@ export function FrontmatterCard({ fm }: { fm: Frontmatter | null }) {
       ) : (
         <>
           {typeof type === 'string' && type.trim() ? (
-            <div className="okf" title={OKF_HINT}>
-              <span className="okf-label">OKF type</span>
-              <span className="okf-value">{type}</span>
-            </div>
+            <>
+              <div className="okf" title={OKF_HINT}>
+                <span className="okf-label">OKF type</span>
+                <span className="okf-value">{type}</span>
+              </div>
+              <OkfSignals data={fm.data!} />
+            </>
           ) : null}
           {entries.length === 0 ? (
             <p className="panel-empty">The frontmatter block is empty.</p>

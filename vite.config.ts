@@ -44,7 +44,7 @@ export default defineConfig(({ mode }) => ({
               // The app, fonts, the Markdown pipeline and highlighting are cached on install.
               // The diagram renderer is large, so its pieces are cached the first time a diagram is shown.
               globPatterns: ['**/*.{js,css,html,woff2,svg,png}'],
-              globIgnores: ['og.png', '**/*{Diagram,diagram,elk,cytoscape,cose-bilkent,mermaid,dagre,swimlanes,mindmap,katex-gChunk}*'],
+              globIgnores: ['og.png', '**/*{Diagram,diagram,elk,cose-bilkent,mermaid,dagre,swimlanes,mindmap,katex-gChunk}*'],
               maximumFileSizeToCacheInBytes: 3_000_000,
               navigateFallback: '/index.html',
               cleanupOutdatedCaches: true,

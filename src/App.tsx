@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { docStats, extractFrontmatter } from './frontmatter'
 import { FrontmatterCard } from './frontmatter-card'
 import { FolderPanel, RecentPanel } from './side-panels'
-import { addRecent, clearRecent, listRecent, removeRecent, touchFolderPath, type RecentEntry } from './recent'
-import type { SearchIndex } from './search'
+import { addRecent, clearRecent, listRecent, removeRecent, touchFolderPath, touchZipPath, type RecentEntry } from './recent'
+import type { Scan } from './scan'
+import type { OpenOpts } from './side-panels'
+import { FileLinksPanel } from './side-panels'
+import { GraphView } from './graph-view'
+import { activeCount, matches, type Filters } from './filters'
 import {
-  assetUrl, canPickDirectory, ensurePermission, findFile, fromDirectoryHandle, fromDroppedEntry, fromFileList,
-  isMarkdownName, pickDirectory, releaseWorkspace, resolvePath, startFile, type Workspace,
+  assetUrl, canPickDirectory, ensurePermission, fromDirectoryHandle, fromDroppedEntry, fromFileList,
+  isMarkdownName, pickDirectory, releaseWorkspace, resolveLink, startFile, type Workspace,
 } from './workspace'
 import { SAMPLE, SAMPLE_NAME } from './sample'
 import { Icon } from './icons'
@@ -14,7 +18,7 @@ import { baseName, buildStandaloneHtml, copyRich, downloadBlob, escapeHtml, meta
 import { ExportMenu } from './export-menu'
 
 type Theme = 'system' | 'light' | 'dark'
-type View = 'preview' | 'source'
+type View = 'preview' | 'source' | 'graph'
 interface Doc { name: string; text: string; /** path inside the opened folder */ path?: string }
 /** History entries for opened files. depth counts entries since home; ws + path identify a file in a folder. */
 interface HistState { kmvFile: true; depth: number; ws?: number; path?: string }
@@ -143,12 +147,25 @@ function clearMarks(root: HTMLElement) {
   root.normalize()
 }
 
+/** The link or image in the article that points at `href`, for jumping to a reported broken link. */
+function findLink(root: HTMLElement, href: string): HTMLElement | null {
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('a[href], [data-local-src], .img-missing'))) {
+    const h = el.getAttribute('href') ?? el.getAttribute('data-local-src') ?? el.getAttribute('title')
+    if (h === href) return el
+  }
+  return null
+}
+function flash(el: HTMLElement | null) {
+  if (!el) return null
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash')
+  return el
+}
+
 /** Images with relative paths are read from the opened folder; without one, a note explains why they're missing. */
-function showLocalImages(root: HTMLElement, ws: Workspace | null, docPath: string | undefined) {
+function showLocalImages(root: HTMLElement, ws: Workspace | null, docPath: string | undefined, rootFallback: boolean) {
   root.querySelectorAll<HTMLImageElement>('img[data-local-src]').forEach((img) => {
     const src = img.dataset.localSrc ?? ''
-    const target = ws && docPath !== undefined ? resolvePath(docPath, src) : null
-    const file = ws && target !== null ? findFile(ws, target) : null
+    const file = ws && docPath !== undefined ? resolveLink(ws, docPath, src, rootFallback).file : null
     if (ws && file) {
       assetUrl(ws, file).then((u) => { if (img.isConnected) img.src = u }, () => missing(img, src, 'could not be read'))
     } else missing(img, src, ws ? 'is not in this folder' : 'opens with its folder')
@@ -171,6 +188,8 @@ export default function App() {
   const [doc, setDoc] = useState<Doc>(() => store.get<Doc>('kmv.doc', { name: SAMPLE_NAME, text: SAMPLE }))
   const [theme, setTheme] = useState<Theme>(() => store.get<Theme>('kmv.theme', 'system'))
   const [view, setView] = useState<View>('preview')
+  const viewRef = useRef(view)
+  viewRef.current = view
   const [html, setHtml] = useState('')
   const [srcHtml, setSrcHtml] = useState('')
   const [rendering, setRendering] = useState(true)
@@ -183,7 +202,8 @@ export default function App() {
   const [includeFm, setIncludeFm] = useState(() => store.get<boolean>('kmv.exportFm', true))
   const [busy, setBusy] = useState(false)
   const [ws, setWs] = useState<Workspace | null>(null)
-  const [index, setIndex] = useState<SearchIndex | null>(null)
+  const [scan, setScan] = useState<Scan | null>(null)
+  const [filters, setFilters] = useState<Filters>({})
   const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null)
   const [query, setQuery] = useState('')
   const [recent, setRecent] = useState<RecentEntry[]>([])
@@ -198,7 +218,11 @@ export default function App() {
   const wsRef = useRef(ws)
   wsRef.current = ws
   /** What to do once the next document has rendered: jump to a heading, or highlight search words. */
-  const pendingRef = useRef<{ hash?: string; terms?: string[] } | null>(null)
+  const pendingRef = useRef<{ hash?: string; terms?: string[]; href?: string } | null>(null)
+  const scanRef = useRef(scan)
+  scanRef.current = scan
+  /** OKF bundles of v0.2 or earlier may also resolve paths from the bundle root. */
+  const rootFallback = () => { const o = scanRef.current?.analysis.okf; return !!o && !(o.version && parseFloat(o.version) >= 0.3) }
 
   const fm = useMemo(() => extractFrontmatter(doc.text), [doc.text])
   const stats = useMemo(() => docStats(doc.text), [doc.text])
@@ -253,10 +277,11 @@ export default function App() {
       bar.querySelector('.code-lang')!.textContent = lang && lang !== 'text' ? lang : ''
       wrap.prepend(bar)
     })
-    showLocalImages(el, wsRef.current, docRef.current.path)
+    showLocalImages(el, wsRef.current, docRef.current.path, rootFallback())
     const pending = pendingRef.current
     pendingRef.current = null
-    if (pending?.hash) scrollPaneTo(mainRef.current, findAnchor(pending.hash), false)
+    if (pending?.href) scrollPaneTo(mainRef.current, flash(findLink(el, pending.href)), false)
+    else if (pending?.hash) scrollPaneTo(mainRef.current, findAnchor(pending.hash), false)
     else if (pending?.terms?.length) scrollPaneTo(mainRef.current, markTerms(el, pending.terms), false)
     renderMermaid(el, dark)
   }, [html, view]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -358,13 +383,15 @@ export default function App() {
   }, [showDoc])
 
   /** Open a file from the opened folder. */
-  const openPath = useCallback(async (path: string, opts: { history?: 'push' | 'replace' | 'none'; hash?: string; terms?: string[]; force?: boolean } = {}) => {
+  const openPath = useCallback(async (path: string, opts: { history?: 'push' | 'replace' | 'none'; hash?: string; terms?: string[]; href?: string; force?: boolean } = {}) => {
     const w = wsRef.current
     const f = w?.files.get(path)
     if (!w || !f) return false
     if (path === docRef.current.path && opts.history !== 'none' && !opts.force) {
       setDrawer(false)
-      if (opts.hash) scrollPaneTo(mainRef.current, findAnchor(opts.hash))
+      if (viewRef.current !== 'preview') { pendingRef.current = { hash: opts.hash, terms: opts.terms, href: opts.href }; setView('preview'); return true }
+      if (opts.href && articleRef.current) scrollPaneTo(mainRef.current, flash(findLink(articleRef.current, opts.href)))
+      else if (opts.hash) scrollPaneTo(mainRef.current, findAnchor(opts.hash))
       else if (opts.terms?.length && articleRef.current) {
         clearMarks(articleRef.current)
         scrollPaneTo(mainRef.current, markTerms(articleRef.current, opts.terms))
@@ -381,11 +408,12 @@ export default function App() {
       return false
     }
     const next: Doc = { name: f.name, text, path }
-    pendingRef.current = opts.hash || opts.terms ? { hash: opts.hash, terms: opts.terms } : null
+    pendingRef.current = opts.hash || opts.terms || opts.href ? { hash: opts.hash, terms: opts.terms, href: opts.href } : null
     if (opts.history !== 'none') record(next, opts.history ?? 'push')
     else lastFileRef.current = next
     showDoc(next)
     if (w.handle) touchFolderPath(w.handle, path)
+    else if (w.source === 'zip') touchZipPath(w.name, path)
     return true
   }, [record, showDoc])
 
@@ -399,9 +427,8 @@ export default function App() {
       return
     }
     const hash = href.includes('#') ? href.slice(href.indexOf('#') + 1) : undefined
-    const target = resolvePath(from, href)
+    const { target, file: f } = resolveLink(w, from, href, rootFallback())
     if (target === null) { setToast({ msg: `${href} is outside the opened folder.` }); return }
-    const f = findFile(w, target)
     if (!f) { setToast({ msg: `${target || href} isn't in this folder.` }); return }
     if (f.kind === 'md') { openPath(f.path, { hash }); return }
     // Images, PDFs and other files open in a new tab, straight from your disk.
@@ -429,10 +456,12 @@ export default function App() {
   const closeFolder = useCallback(() => {
     const w = wsRef.current
     if (w) releaseWorkspace(w)
-    setWs(null); setIndex(null); setIndexing(null); setQuery('')
+    setWs(null); setScan(null); setIndexing(null); setQuery(''); setFilters({})
+    if (viewRef.current === 'graph') setView('preview')
   }, [])
 
   const readFile = useCallback(async (f: File | Blob & { name: string }) => {
+    if (/\.zip$/i.test(f.name) || f.type === 'application/zip') { openZipRef.current(f); return }
     const isText = isMarkdownName(f.name) || f.type.startsWith('text/')
     if (!isText) { setToast({ msg: `${f.name} isn't a Markdown or text file.` }); return }
     if (f.size > 10_000_000) { setToast({ msg: `${f.name} is over 10 MB, which is too large to preview.` }); return }
@@ -444,27 +473,49 @@ export default function App() {
 
   /** Show an opened folder: its first file, the file tree, and a search index built in the background. */
   const indexJob = useRef<{ cancelled: boolean } | null>(null)
-  const loadWorkspace = useCallback(async (w: Workspace | null, start?: string) => {
+  const loadWorkspace = useCallback(async (w: Workspace | null, start?: string, zipBlob?: Blob) => {
     if (!w) return
     if (!w.docs.length) { setToast({ msg: `There are no Markdown files in ${w.name}.` }); return }
     const old = wsRef.current
     if (old && old !== w) releaseWorkspace(old)
     if (indexJob.current) indexJob.current.cancelled = true
     wsRef.current = w
-    setWs(w); setIndex(null); setQuery('')
+    setWs(w); setScan(null); setQuery(''); setFilters({})
     const first = start && w.files.has(start) ? start : startFile(w)!
     const prev = docRef.current
     if (await openPath(first, { history: 'replace', force: true })) {
       setToast({ msg: `Opened ${w.name} · ${w.docs.length.toLocaleString()} Markdown file${w.docs.length === 1 ? '' : 's'}`, undo: prev.path ? undefined : prev })
     }
     if (w.handle) addRecent({ kind: 'folder', name: w.name, handle: w.handle, path: first }).then(setRecent)
+    else if (w.source === 'zip' && zipBlob) addRecent({ kind: 'zip', name: w.name, blob: zipBlob, path: first }).then(setRecent)
     const job = { cancelled: false }
     indexJob.current = job
     setIndexing({ done: 0, total: w.docs.length })
-    const { buildIndex } = await import('./search')
-    const idx = await buildIndex(w, (done, total) => { if (!job.cancelled) setIndexing({ done, total }) }, job)
-    if (!job.cancelled) { setIndex(idx); setIndexing(null) }
+    try {
+      const { scanFolder } = await import('./scan')
+      const result = await scanFolder(w, (done, total) => { if (!job.cancelled) setIndexing({ done, total }) }, job)
+      if (!job.cancelled && result) {
+        setScan(result); setIndexing(null)
+        // Images in a v0.2 bundle may need the root-relative fallback, so show them again.
+        if (articleRef.current && result.analysis.okf) showLocalImages(articleRef.current, w, docRef.current.path, rootFallback())
+      }
+    } catch (e) {
+      if (!job.cancelled) { setIndexing(null); setToast({ msg: 'Could not read every file in the folder: ' + String((e as Error)?.message ?? e) }) }
+    }
   }, [openPath])
+
+  /** Open a .zip archive as a folder (for example an OKF bundle). */
+  const openZipRef = useRef<(f: Blob & { name: string }, start?: string) => void>(() => {})
+  openZipRef.current = async (f, start) => {
+    if (f.size > 200_000_000) { setToast({ msg: `${f.name} is over 200 MB, which is too large to open here.` }); return }
+    try {
+      const { fromZip } = await import('./zip')
+      const w = await fromZip(f)
+      loadWorkspace(w, start, f)
+    } catch (e) {
+      setToast({ msg: `Could not open ${f.name}: ${String((e as Error)?.message ?? e)}` })
+    }
+  }
 
   const openFolder = useCallback(async () => {
     if (!canPickDirectory) { folderRef.current?.click(); return }
@@ -477,6 +528,8 @@ export default function App() {
   }, [loadWorkspace])
 
   const openRecent = useCallback(async (r: RecentEntry) => {
+    // The stored entry knows which file was open last.
+    r = (await listRecent()).find((x) => x.id === r.id) ?? r
     if (r.kind === 'file') {
       if (r.text === undefined) return
       closeFolder()
@@ -484,6 +537,7 @@ export default function App() {
       addRecent({ kind: 'file', name: r.name, text: r.text }).then(setRecent)
       return
     }
+    if (r.kind === 'zip') { if (r.blob) openZipRef.current(new File([r.blob], r.name + '.zip', { type: 'application/zip' }), r.path); return }
     if (!r.handle) return
     if (!(await ensurePermission(r.handle))) { setToast({ msg: `Access to ${r.name} wasn't allowed.` }); return }
     try { loadWorkspace(await fromDirectoryHandle(r.handle), r.path) }
@@ -641,13 +695,26 @@ export default function App() {
       onClear={() => { clearRecent(); setRecent([]) }}
     />
   )
+  const openFromPanel = useCallback((path: string, o?: OpenOpts) => {
+    if (viewRef.current === 'graph' && !o) { openPath(path); return }
+    if (viewRef.current === 'source') setView('preview')
+    openPath(path, { terms: o?.terms, href: o?.href })
+  }, [openPath])
+  const filterMatch = useMemo(() => {
+    if (!scan || !activeCount(filters)) return null
+    const docs = scan.analysis.docs
+    return (p: string) => { const d = docs.get(p); return !!d && matches(d, filters) }
+  }, [scan, filters])
+
   const sidebar = (
     <>
       {ws && (
         <FolderPanel
-          ws={ws} current={doc.path} query={query} onQuery={setQuery} index={index} indexing={indexing}
+          key={ws.id}
+          ws={ws} current={doc.path} query={query} onQuery={setQuery} scan={scan} indexing={indexing}
+          filters={filters} onFilters={setFilters}
           searchRef={searchRef} onClose={() => { closeFolder(); if (doc.path) goHome() }}
-          onOpen={(path, terms) => openPath(path, { terms })}
+          onOpen={openFromPanel}
         />
       )}
       {isHome && recentPanel}
@@ -676,12 +743,13 @@ export default function App() {
           <p className="panel-empty">No headings yet.</p>
         )}
       </nav>
+      {ws && scan && doc.path && <FileLinksPanel analysis={scan.analysis} path={doc.path} onOpen={openFromPanel} />}
       {!isHome && recentPanel}
     </>
   )
 
   return (
-    <div className="app">
+    <div className={'app' + (ws ? ' has-ws' : '')}>
       <header className="bar">
         <div className="brand">
           <a className="brand-home" href="https://kagitha.com" target="_blank" rel="noopener">kagitha</a>
@@ -700,18 +768,19 @@ export default function App() {
           )}
         </div>
         <div className="actions">
-          <button type="button" className="btn btn--primary" onClick={() => fileRef.current?.click()} title="Open a file (Ctrl+O)">
+          <button type="button" className="btn btn--primary" onClick={() => fileRef.current?.click()} title="Open a Markdown file or a .zip bundle (Ctrl+O)">
             <Icon name="file" /><span className="btn-text">Open</span>
           </button>
           <button type="button" className="btn btn--folder" onClick={openFolder} title="Open a folder (Ctrl+Shift+O)">
             <Icon name="folder" /><span className="btn-text">Folder</span>
           </button>
-          <button type="button" className="btn" onClick={() => setPasteOpen(true)} title="Paste Markdown (Ctrl+Shift+V)">
+          <button type="button" className="btn btn--paste" onClick={() => setPasteOpen(true)} title="Paste Markdown (Ctrl+Shift+V)">
             <Icon name="paste" /><span className="btn-text">Paste</span>
           </button>
           <div className="seg" role="group" aria-label="View">
             <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button>
             <button type="button" aria-pressed={view === 'source'} onClick={() => setView('source')}>Source</button>
+            {ws && <button type="button" aria-pressed={view === 'graph'} onClick={() => setView('graph')} title="Map of how the files link together">Graph</button>}
           </div>
           <button type="button" className="btn btn--icon" onClick={cycleTheme} title={themeLabel} aria-label={themeLabel}>
             <Icon name={theme === 'system' ? 'auto' : theme === 'light' ? 'sun' : 'moon'} />
@@ -733,7 +802,7 @@ export default function App() {
           </button>
         </div>
         <input
-          ref={fileRef} type="file" hidden accept=".md,.markdown,.mdown,.mkd,.mdx,.txt,text/markdown,text/plain"
+          ref={fileRef} type="file" hidden accept=".md,.markdown,.mdown,.mkd,.mdx,.txt,.zip,text/markdown,text/plain,application/zip"
           onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f); e.target.value = '' }}
         />
         <input
@@ -746,7 +815,12 @@ export default function App() {
       <div className="body">
         <aside className="side" aria-label="Document details">{sidebar}</aside>
 
-        <div className="main" ref={mainRef}>
+        <div className={'main' + (view === 'graph' ? ' main--graph' : '')} ref={mainRef}>
+          {view === 'graph' && ws ? (
+            scan ? (
+              <GraphView analysis={scan.analysis} current={doc.path} match={filterMatch} dark={dark} onOpen={(p) => { setView('preview'); openPath(p) }} />
+            ) : <p className="graph-msg">Reading files{indexing ? ` (${indexing.done} of ${indexing.total})` : ''}…</p>
+          ) : (
           <main className="reading">
             {view === 'preview' && hasFm && (
               <div className="print-meta" dangerouslySetInnerHTML={{ __html: metaHtml(fm!.data) }} />
@@ -762,6 +836,7 @@ export default function App() {
               <div className="source" dangerouslySetInnerHTML={{ __html: srcHtml }} />
             )}
           </main>
+          )}
         </div>
       </div>
 
@@ -770,6 +845,7 @@ export default function App() {
         <span className="nowrap">{stats.minutes} min read</span>
         <span className="hide-sm">{doc.text.split('\n').length.toLocaleString()} lines</span>
         {ws && <span className="hide-sm nowrap">{ws.docs.length.toLocaleString()} files in {ws.name}</span>}
+        {scan?.analysis.okf && <span className="hide-sm nowrap">OKF bundle{scan.analysis.okf.version ? ` v${scan.analysis.okf.version}` : ''}</span>}
         {installPrompt && (
           <button type="button" className="status-btn" onClick={install} title="Install the viewer as an app that works offline">
             <Icon name="install" /><span className="hide-xs">Install app</span>
@@ -796,7 +872,7 @@ export default function App() {
           <div className="drop-box">
             <Icon name="open" />
             <strong>Drop to open</strong>
-            <span>a .md file, or a whole folder</span>
+            <span>a .md file, a folder or a .zip bundle</span>
           </div>
         </div>
       )}

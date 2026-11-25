@@ -17,7 +17,7 @@ related:
 
 Open a \`.md\` file and read it as a clean, formatted page. Your file is **opened in your browser and never uploaded**: there is no server, no account and no tracking.
 
-> **Try it:** drop a \`.md\` file onto this window, press **Open**, or paste Markdown with **Paste**. To read a whole set of notes, open a **Folder**.
+> **Try it:** drop a \`.md\` file onto this window, press **Open**, or paste Markdown with **Paste**. To read a whole set of notes, open a **Folder** or a \`.zip\` file.
 
 The panel beside this page reads the YAML frontmatter at the top of the file and shows it as a tidy card. If a file uses Google's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF), its \`type\` field is highlighted.
 
@@ -41,6 +41,16 @@ Press **Folder** (or drop a folder onto this window) to open a set of notes, doc
 - **Images** with relative paths, such as \`![diagram](img/flow.png)\`, are shown from the folder
 - **Search across every file** (Ctrl/Cmd+K), with the matching words highlighted
 
+## Open Knowledge Format bundles
+
+Open an [OKF](https://github.com/open-knowledge-format/open-knowledge-format) bundle as a folder or as a \`.zip\` file, and the viewer understands it:
+
+- **Contents** built from the bundle's \`index.md\` files, with its title, description and license
+- **Checks** against the OKF v0.3 rules: a missing \`type\`, broken links and paths, unreadable frontmatter, stale entries (\`stale_after\`), and verifications that are out of date
+- **Trust and freshness** for each concept: status, trust tier (unverified, machine-confirmed, human-reviewed), and when it goes stale
+- A **graph** of how the files link together, coloured by \`type\`
+- **Filters** by type, status, tag, trust, freshness and date, plus the files that link to the one you're reading
+
 Recent files and folders are listed on this page, and are kept only in your browser. The viewer can also be **installed as an app** that works offline.
 
 ### Roadmap
@@ -49,7 +59,8 @@ Recent files and folders are listed on this page, and are kept only in your brow
 - [x] Light and dark themes
 - [x] Open whole folders, with search across files
 - [x] Installable app that works offline
-- [ ] OKF bundle validator and graph view
+- [x] OKF bundle validator, graph view and filters
+- [x] Open bundles from .zip files
 
 ## Code
 
