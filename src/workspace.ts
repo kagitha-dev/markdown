@@ -5,6 +5,8 @@ export interface WsFile {
   name: string
   kind: 'md' | 'image' | 'other'
   get(): Promise<File>
+  /** Present for folders opened with the File System Access API, so the file can be saved back. */
+  handle?: FileSystemFileHandle
 }
 
 export interface Workspace {
@@ -71,6 +73,64 @@ export async function ensurePermission(handle: FileSystemDirectoryHandle): Promi
   } catch { return false }
 }
 
+/* ---------- saving (File System Access API) ---------- */
+
+export const canSaveFiles = typeof window !== 'undefined' && 'showSaveFilePicker' in window
+export const canPickFile = typeof window !== 'undefined' && 'showOpenFilePicker' in window
+
+/** Asks to save into a file or folder. Must run in a click or key press. */
+export async function ensureWrite(handle: FileSystemHandle): Promise<boolean> {
+  const h = handle as any
+  try {
+    if ((await h.queryPermission?.({ mode: 'readwrite' })) === 'granted') return true
+    return (await h.requestPermission?.({ mode: 'readwrite' })) === 'granted'
+  } catch { return false }
+}
+
+export async function writeFile(handle: FileSystemFileHandle, text: string) {
+  const w = await (handle as any).createWritable()
+  await w.write(text)
+  await w.close()
+}
+
+const MD_TYPES = [{ description: 'Markdown', accept: { 'text/markdown': ['.md', '.markdown', '.mdown', '.mkd', '.mdx', '.txt'] } }]
+
+export async function pickSaveFile(suggestedName: string, startIn?: FileSystemHandle): Promise<FileSystemFileHandle | null> {
+  try {
+    return await (window as any).showSaveFilePicker({ suggestedName, types: MD_TYPES, id: 'kmv-save', ...(startIn ? { startIn } : {}) })
+  } catch (e) {
+    if ((e as DOMException)?.name === 'AbortError') return null
+    throw e
+  }
+}
+
+export async function pickOpenFile(): Promise<FileSystemFileHandle | null> {
+  try {
+    const [h] = await (window as any).showOpenFilePicker({
+      id: 'kmv-open',
+      types: [
+        { description: 'Markdown or text', accept: { 'text/markdown': ['.md', '.markdown', '.mdown', '.mkd', '.mdx'], 'text/plain': ['.txt'] } },
+        { description: 'Zip bundle', accept: { 'application/zip': ['.zip'] } },
+      ],
+    })
+    return h ?? null
+  } catch (e) {
+    if ((e as DOMException)?.name === 'AbortError') return null
+    throw e
+  }
+}
+
+/** Create a new file (and any folders on its path) inside an opened folder. */
+export async function createFileIn(root: FileSystemDirectoryHandle, path: string, text: string): Promise<FileSystemFileHandle> {
+  const parts = path.split('/').filter(Boolean)
+  const name = parts.pop()!
+  let dir = root
+  for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true })
+  const h = await dir.getFileHandle(name, { create: true })
+  await writeFile(h, text)
+  return h
+}
+
 export async function fromDirectoryHandle(root: FileSystemDirectoryHandle): Promise<Workspace> {
   const files = new Map<string, WsFile>()
   async function walk(dir: FileSystemDirectoryHandle, prefix: string) {
@@ -81,7 +141,7 @@ export async function fromDirectoryHandle(root: FileSystemDirectoryHandle): Prom
       } else if (!entry.name.startsWith('.')) {
         const fh = entry as FileSystemFileHandle
         const path = prefix + entry.name
-        files.set(path, { path, name: entry.name, kind: kindOf(entry.name), get: () => fh.getFile() })
+        files.set(path, { path, name: entry.name, kind: kindOf(entry.name), get: () => fh.getFile(), handle: fh })
       }
     }
   }

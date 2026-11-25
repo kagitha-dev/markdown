@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { docStats, extractFrontmatter } from './frontmatter'
 import { FrontmatterCard } from './frontmatter-card'
 import { FolderPanel, RecentPanel } from './side-panels'
@@ -9,8 +9,9 @@ import { FileLinksPanel } from './side-panels'
 import { GraphView } from './graph-view'
 import { activeCount, matches, type Filters } from './filters'
 import {
-  assetUrl, canPickDirectory, ensurePermission, fromDirectoryHandle, fromDroppedEntry, fromFileList,
-  isMarkdownName, pickDirectory, releaseWorkspace, resolveLink, startFile, type Workspace,
+  assetUrl, canPickDirectory, canPickFile, canSaveFiles, createFileIn, dirOf, ensurePermission, ensureWrite, fromDirectoryHandle,
+  fromDroppedEntry, fromFileList, isMarkdownName, pickDirectory, pickOpenFile, pickSaveFile, releaseWorkspace, resolveLink,
+  startFile, writeFile, type Workspace,
 } from './workspace'
 import { SAMPLE, SAMPLE_NAME } from './sample'
 import { Icon } from './icons'
@@ -18,10 +19,53 @@ import { headOf, render } from './renderer'
 import { baseName, buildStandaloneHtml, copyRich, downloadBlob, escapeHtml, metaHtml } from './export'
 import { ExportMenu } from './export-menu'
 import { FindBar, type FindRequest } from './find-bar'
+import type { CursorInfo, EditorApi } from './editor'
+import { MenuBar, NameDialog, ShortcutsDialog, Toolbar, type MenuDef, type MenuItem, type ToolDef } from './edit-menu'
+import { isMac, KEYS, keyLabel } from './edit-keys'
+
+/** The editor (CodeMirror) is loaded the first time someone edits. */
+const Editor = lazy(() => import('./editor'))
 
 type Theme = 'system' | 'light' | 'dark'
-type View = 'preview' | 'source' | 'graph'
-interface Doc { name: string; text: string; /** path inside the opened folder */ path?: string }
+type View = 'preview' | 'source' | 'graph' | 'edit'
+/** How the editor shares the screen with the preview. */
+type Layout = 'write' | 'split' | 'preview'
+interface Doc {
+  name: string
+  text: string
+  /** path inside the opened folder */
+  path?: string
+  /** the file on disk, when the browser can save back to it */
+  handle?: FileSystemFileHandle
+  /** the text as last opened or saved; null for a new document that was never saved */
+  saved?: string | null
+  /** made with New and not saved to a file yet */
+  isNew?: boolean
+}
+/** Stands for "saved text unknown" (a document restored from an earlier visit with unsaved changes). */
+const UNKNOWN = '\u0000'
+const isDirty = (d: Doc) => d.saved !== undefined && d.saved !== d.text && !(d.isNew && !d.text.trim())
+const isHomeDoc = (d: Doc) => d.name === SAMPLE_NAME && d.text === SAMPLE && !d.path
+const today = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+function loadDoc(): Doc {
+  const d = store.get<{ name: string; text: string; path?: string; isNew?: boolean; dirty?: boolean } | null>('kmv.doc', null)
+  if (!d || typeof d.text !== 'string') return { name: SAMPLE_NAME, text: SAMPLE, saved: SAMPLE }
+  return { name: d.name, text: d.text, path: d.path, isNew: d.isNew, saved: d.isNew ? null : d.dirty ? UNKNOWN : d.text }
+}
+const TEMPLATES: Record<string, { name: string; text: () => string }> = {
+  note: { name: 'Untitled.md', text: () => `---\ntitle: "Untitled note"\ndate: ${today()}\ntags: []\n---\n\n# Untitled note\n\n` },
+  readme: {
+    name: 'README.md',
+    text: () => '# Project name\n\nOne or two sentences about what this is and who it is for.\n\n## Getting started\n\n```bash\nnpm install\nnpm run dev\n```\n\n## Usage\n\n## Contributing\n\n## License\n',
+  },
+  okf: {
+    name: 'concept.md',
+    text: () => `---\ntype: concept\ntitle: "Untitled concept"\ndescription: One line about what this file explains.\nstatus: draft\ntags: []\ngenerated:\n  by: human:you\n  at: ${today()}\n---\n\n# Untitled concept\n\n`,
+  },
+}
 /** History entries for opened files. depth counts entries since home; ws + path identify a file in a folder. */
 interface HistState { kmvFile: true; depth: number; ws?: number; path?: string }
 
@@ -58,6 +102,8 @@ function systemDark() {
 }
 
 /* ---------- mermaid (bundled with the app, loaded only when a document needs it) ---------- */
+/** Drawn diagrams by theme and source, so editing doesn't redraw the ones that didn't change. */
+const mermaidCache = new Map<string, string>()
 let mermaidLoad: Promise<any> | null = null
 function loadMermaid(): Promise<any> {
   if (!mermaidLoad)
@@ -68,6 +114,12 @@ let mermaidSeq = 0
 async function renderMermaid(root: HTMLElement, dark: boolean) {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>('.mermaid-block'))
   if (!blocks.length) return
+  // Diagrams drawn before appear at once, without waiting for the renderer.
+  for (const b of blocks) {
+    const hit = mermaidCache.get((dark ? 'd' : 'l') + (b.dataset.source ?? ''))
+    if (hit) { b.innerHTML = hit; b.removeAttribute('data-error') }
+  }
+  if (blocks.every((b) => mermaidCache.has((dark ? 'd' : 'l') + (b.dataset.source ?? '')))) return
   let mermaid: any
   try { mermaid = await loadMermaid() } catch (e) {
     blocks.forEach((b) => b.setAttribute('data-error', 'Could not load the diagram renderer: ' + (e as Error).message))
@@ -80,8 +132,13 @@ async function renderMermaid(root: HTMLElement, dark: boolean) {
   for (const b of blocks) {
     if (!b.isConnected) continue
     const src = b.dataset.source ?? ''
+    const key = (dark ? 'd' : 'l') + src
+    const hit = mermaidCache.get(key)
+    if (hit) { b.innerHTML = hit; b.removeAttribute('data-error'); continue }
     try {
       const { svg } = await mermaid.render('mmd-' + ++mermaidSeq, src)
+      if (mermaidCache.size > 200) mermaidCache.clear()
+      mermaidCache.set(key, svg)
       if (b.isConnected) { b.innerHTML = svg; b.removeAttribute('data-error') }
     } catch (e) {
       b.setAttribute('data-error', 'Diagram error: ' + String((e as Error)?.message ?? e).split('\n')[0])
@@ -197,9 +254,20 @@ function missing(img: HTMLImageElement, src: string, why: string) {
   img.replaceWith(box)
 }
 
+function useMedia(q: string) {
+  const [m, setM] = useState(() => window.matchMedia(q).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(q)
+    const on = () => setM(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [q])
+  return m
+}
+
 /* ---------- App ---------- */
 export default function App() {
-  const [doc, setDoc] = useState<Doc>(() => store.get<Doc>('kmv.doc', { name: SAMPLE_NAME, text: SAMPLE }))
+  const [doc, setDoc] = useState<Doc>(loadDoc)
   const [theme, setTheme] = useState<Theme>(() => store.get<Theme>('kmv.theme', 'system'))
   const [view, setView] = useState<View>('preview')
   const viewRef = useRef(view)
@@ -234,6 +302,32 @@ export default function App() {
   const findOpenRef = useRef(false)
   findOpenRef.current = !!find
 
+  /* ---------- editor state ---------- */
+  const [layout, setLayout] = useState<Layout>(() => store.get<Layout>('kmv.editLayout', 'split'))
+  const [edSide, setEdSide] = useState(() => store.get<boolean>('kmv.editSide', false))
+  const [wrap, setWrap] = useState(() => store.get<boolean>('kmv.wrap', true))
+  const [lineNums, setLineNums] = useState(() => store.get<boolean>('kmv.lineNumbers', false))
+  const [syncScroll, setSyncScroll] = useState(() => store.get<boolean>('kmv.sync', true))
+  useEffect(() => { store.set('kmv.editLayout', layout); store.set('kmv.editSide', edSide); store.set('kmv.wrap', wrap); store.set('kmv.lineNumbers', lineNums); store.set('kmv.sync', syncScroll) }, [layout, edSide, wrap, lineNums, syncScroll])
+  const narrow = useMedia('(max-width: 900px)')
+  /** Side by side needs room; narrow screens switch between writing and the preview. */
+  const lay: Layout = narrow && layout === 'split' ? 'write' : layout
+  const layRef = useRef(lay)
+  layRef.current = lay
+  /** Bumped whenever a different document is shown, so the editor starts over with it. */
+  const [docKey, setDocKey] = useState(1)
+  const docKeyRef = useRef(1)
+  /** The editor stays loaded (hidden) after switching to reading, so its undo history survives. */
+  const [edMounted, setEdMounted] = useState(false)
+  const edRef = useRef<EditorApi | null>(null)
+  const [cursor, setCursor] = useState<CursorInfo | null>(null)
+  const [keysOpen, setKeysOpen] = useState(false)
+  const [nameDialog, setNameDialog] = useState<string | null>(null)
+  /** Unsaved changes to other files in the opened folder, by "folder id:path". */
+  const draftsRef = useRef(new Map<string, Doc>())
+  const [draftCount, setDraftCount] = useState(0)
+  useEffect(() => { if (view === 'edit') setEdMounted(true) }, [view])
+
   const dark = useResolvedDark(theme)
   const articleRef = useRef<HTMLElement>(null)
   const mainRef = useRef<HTMLDivElement>(null)
@@ -241,7 +335,7 @@ export default function App() {
   const folderRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const sourceRef = useRef<HTMLDivElement>(null)
-  const getFindRoot = useCallback(() => (viewRef.current === 'preview' ? articleRef.current : viewRef.current === 'source' ? sourceRef.current : null), [])
+  const getFindRoot = useCallback(() => (viewRef.current === 'preview' || viewRef.current === 'edit' ? articleRef.current : viewRef.current === 'source' ? sourceRef.current : null), [])
   const wsRef = useRef(ws)
   wsRef.current = ws
   /** What to do once the next document has rendered: jump to a heading, or highlight search words. */
@@ -257,19 +351,29 @@ export default function App() {
   /** Very long rendered pages skip layout for the parts that are off screen. */
   const bigDoc = (htmlFor?.length ?? 0) > 200_000
   const title = (typeof fm?.data?.title === 'string' && fm.data.title) || doc.name
+  const dirty = isDirty(doc)
+  /** Views that show the rendered article (the editor shows it next to the source). */
+  const showsArticle = view === 'preview' || view === 'edit'
 
   /* theme class + persistence */
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
     store.set('kmv.theme', theme)
   }, [dark, theme])
-  useEffect(() => { if (doc.text.length < MAX_SAVE) store.set('kmv.doc', doc) }, [doc])
-  useEffect(() => { document.title = `${title} · kagitha Markdown Viewer` }, [title])
+  /* The open document is kept in the browser (a moment after typing stops), so a reload brings it back. */
+  useEffect(() => {
+    if (doc.text.length >= MAX_SAVE) return
+    const t = setTimeout(() => store.set('kmv.doc', { name: doc.name, text: doc.text, path: doc.path, isNew: doc.isNew, dirty: isDirty(doc) }), 400)
+    return () => clearTimeout(t)
+  }, [doc])
+  useEffect(() => { document.title = `${dirty ? '● ' : ''}${title} · kagitha Markdown Viewer` }, [title, dirty])
 
   /* Render in a background worker (debounced), so large files don't freeze the page. */
   useEffect(() => {
     let live = true
     const text = doc.text
+    // While typing, wait for a short pause; large files wait a little longer.
+    const delay = viewRef.current === 'edit' ? (text.length > 200_000 ? 450 : 110) : 40
     const t = setTimeout(async () => {
       // Long files: show the opening part first, then the whole file when it's ready.
       const head = headOf(text)
@@ -281,7 +385,7 @@ export default function App() {
         if ((e as DOMException)?.name === 'AbortError') return
         if (live) { setHtml(`<p class="render-error">Could not render this file: ${escapeHtml(String(e))}</p>`); setHtmlFor(text) }
       }
-    }, 40)
+    }, delay)
     return () => { live = false; clearTimeout(t) }
   }, [doc.text])
 
@@ -294,8 +398,9 @@ export default function App() {
   }, [view, doc.text]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* A loading card for files that take a moment; small files render too fast to need one. */
-  const partial = view === 'preview' && htmlFor !== doc.text && peekFor === doc.text
-  const pendingView = view === 'source' ? srcFor !== doc.text : view === 'preview' && htmlFor !== doc.text && !partial
+  const partial = showsArticle && htmlFor !== doc.text && peekFor === doc.text
+  // While editing, the last preview stays up until the new one is ready.
+  const pendingView = view === 'source' ? srcFor !== doc.text : showsArticle && htmlFor !== doc.text && !partial && !(view === 'edit' && html)
   useEffect(() => {
     if (!pendingView) { setShowLoader(false); return }
     const t = setTimeout(() => setShowLoader(true), 180)
@@ -306,7 +411,7 @@ export default function App() {
      Runs before the first paint so the initial layout is cheap. */
   useLayoutEffect(() => {
     const el = articleRef.current
-    if (!el || view !== 'preview' || !bigDoc) return
+    if (!el || !showsArticle || !bigDoc) return
     const kids = Array.from(el.children)
     for (let i = 0; i < kids.length; i += 40) {
       const chunk = document.createElement('div')
@@ -314,12 +419,12 @@ export default function App() {
       kids[i].before(chunk)
       chunk.append(...kids.slice(i, i + 40))
     }
-  }, [html, view, bigDoc])
+  }, [html, showsArticle, bigDoc])
 
   /* after the article html changes: TOC, copy buttons, diagrams */
   useEffect(() => {
     const el = articleRef.current
-    if (!el || view !== 'preview') return
+    if (!el || !showsArticle) return
     const hs = Array.from(el.querySelectorAll<HTMLElement>('h1[id],h2[id],h3[id]'))
     setToc(hs.map((h) => ({ id: h.id, level: +h.tagName[1], text: (h.textContent ?? '').replace(/#$/, '').trim() })))
     el.querySelectorAll<HTMLElement>('pre.shiki').forEach((pre) => {
@@ -342,7 +447,9 @@ export default function App() {
     else if (pending?.hash) scrollPaneTo(mainRef.current, findAnchor(pending.hash), false)
     else if (pending?.terms?.length) scrollPaneTo(mainRef.current, markTerms(el, pending.terms), false)
     renderMermaid(el, dark)
-  }, [html, view]) // eslint-disable-line react-hooks/exhaustive-deps
+    lineEls.current = null
+    if (viewRef.current === 'edit') requestAnimationFrame(() => syncRef.current('editor'))
+  }, [html, showsArticle]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* re-theme diagrams */
   useEffect(() => {
@@ -404,15 +511,47 @@ export default function App() {
   /* loading files */
   const docRef = useRef(doc)
   docRef.current = doc
-  const isHome = doc.name === SAMPLE_NAME && doc.text === SAMPLE && !doc.path
+  const isHome = isHomeDoc(doc)
   const lastFileRef = useRef<Doc | null>(isHome ? null : doc)
 
+  /** The open document with the editor's latest text (the editor may not have reported it yet). */
+  const liveDoc = useCallback((): Doc => {
+    const d = docRef.current
+    const t = edRef.current?.getText()
+    return t !== undefined && t !== d.text ? { ...d, text: t } : d
+  }, [])
+  const draftKey = (w: Workspace, path: string) => w.id + ':' + path
+
   const showDoc = useCallback((next: Doc) => {
-    setDoc(next)
-    setView('preview')
+    // Unsaved changes to a file in the folder are kept, to come back to.
+    const cur = liveDoc()
+    const w = wsRef.current
+    if (w && cur.path && isDirty(cur) && cur.path !== next.path) {
+      draftsRef.current.set(draftKey(w, cur.path), cur)
+      setDraftCount(draftsRef.current.size)
+    }
+    setDoc(next.saved === undefined ? { ...next, saved: next.text } : next)
+    docKeyRef.current++
+    setDocKey(docKeyRef.current)
+    const editing = viewRef.current === 'edit' && !isHomeDoc(next)
+    setView(editing ? 'edit' : 'preview')
+    if (!editing) setEdMounted(false)
     setDrawer(false)
     mainRef.current?.scrollTo({ top: 0 })
-  }, [])
+  }, [liveDoc])
+
+  /** Unsaved work that an action would throw away; asks before going ahead. */
+  const okToLeave = useCallback((withFolder: boolean) => {
+    const cur = liveDoc()
+    // A file in the folder is kept as a draft when only the file changes.
+    const curCounts = isDirty(cur) && (withFolder || !cur.path || !wsRef.current)
+    const n = (curCounts ? 1 : 0) + (withFolder ? draftsRef.current.size : 0)
+    if (!n) return true
+    const what = n === 1 && curCounts ? `${cur.name} has unsaved changes.` : `${n} files have unsaved changes.`
+    // Embedded previews can't show dialogs (confirm would just say no); the Undo message covers them.
+    if (!isTopWindow) return true
+    try { return window.confirm(`${what} Discard them?`) } catch { return false }
+  }, [liveDoc])
 
   /** Add (or replace) a history entry for a file, so Back and Forward move between files and home. */
   const record = useCallback((next: Doc, mode: 'push' | 'replace') => {
@@ -428,20 +567,21 @@ export default function App() {
 
   /* Opening a file replaces the current file entry, so the browser's Back button returns home. */
   const replaceDoc = useCallback((next: Doc, msg: string) => {
-    setToast({ msg, undo: docRef.current })
+    setToast({ msg, undo: liveDoc() })
     record(next, 'replace')
     showDoc(next)
-  }, [record, showDoc])
+  }, [record, showDoc, liveDoc])
 
-  const goHome = useCallback(() => {
-    if (docRef.current.name === SAMPLE_NAME && docRef.current.text === SAMPLE && !docRef.current.path) {
+  const goHome = useCallback((checked = false) => {
+    if (isHomeDoc(docRef.current)) {
       mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
       return
     }
+    if (!checked && !okToLeave(false)) return
     setToast(null)
     try { const st = histState(); if (st) { history.go(-st.depth); return } } catch { /* fall through */ }
     showDoc({ name: SAMPLE_NAME, text: SAMPLE })
-  }, [showDoc])
+  }, [showDoc, okToLeave])
 
   /** Open a file from the opened folder. */
   const openPath = useCallback(async (path: string, opts: { history?: 'push' | 'replace' | 'none'; hash?: string; terms?: string[]; href?: string; force?: boolean } = {}) => {
@@ -450,7 +590,7 @@ export default function App() {
     if (!w || !f) return false
     if (path === docRef.current.path && opts.history !== 'none' && !opts.force) {
       setDrawer(false)
-      if (viewRef.current !== 'preview') { pendingRef.current = { hash: opts.hash, terms: opts.terms, href: opts.href }; setView('preview'); return true }
+      if (viewRef.current !== 'preview' && viewRef.current !== 'edit') { pendingRef.current = { hash: opts.hash, terms: opts.terms, href: opts.href }; setView('preview'); return true }
       if (opts.href && articleRef.current) scrollPaneTo(mainRef.current, flash(findLink(articleRef.current, opts.href)))
       else if (opts.hash) scrollPaneTo(mainRef.current, findAnchor(opts.hash))
       else if (opts.terms?.length && articleRef.current) {
@@ -460,6 +600,16 @@ export default function App() {
       return true
     }
     let text: string
+    const draft = draftsRef.current.get(draftKey(w, path))
+    if (draft && !opts.force) {
+      draftsRef.current.delete(draftKey(w, path))
+      setDraftCount(draftsRef.current.size)
+      pendingRef.current = opts.hash || opts.terms || opts.href ? { hash: opts.hash, terms: opts.terms, href: opts.href } : null
+      if (opts.history !== 'none') record(draft, opts.history ?? 'push')
+      else lastFileRef.current = draft
+      showDoc(draft)
+      return true
+    }
     try {
       const file = await f.get()
       if (file.size > 10_000_000) { setToast({ msg: `${f.name} is over 10 MB, which is too large to preview.` }); return false }
@@ -517,38 +667,66 @@ export default function App() {
   const closeFolder = useCallback(() => {
     const w = wsRef.current
     if (w) releaseWorkspace(w)
+    draftsRef.current.clear(); setDraftCount(0)
     setWs(null); setScan(null); setIndexing(null); setQuery(''); setFilters({})
     if (viewRef.current === 'graph') setView('preview')
   }, [])
 
-  const readFile = useCallback(async (f: File | Blob & { name: string }) => {
+  const readFile = useCallback(async (f: File | Blob & { name: string }, handle?: FileSystemFileHandle) => {
     if (/\.zip$/i.test(f.name) || f.type === 'application/zip') { openZipRef.current(f); return }
     const isText = isMarkdownName(f.name) || f.type.startsWith('text/')
     if (!isText) { setToast({ msg: `${f.name} isn't a Markdown or text file.` }); return }
     if (f.size > 10_000_000) { setToast({ msg: `${f.name} is over 10 MB, which is too large to preview.` }); return }
+    if (!okToLeave(true)) return
     const text = await f.text()
     closeFolder()
-    replaceDoc({ name: f.name, text }, `Opened ${f.name}`)
+    replaceDoc({ name: f.name, text, handle }, `Opened ${f.name}`)
     addRecent({ kind: 'file', name: f.name, text }).then(setRecent)
-  }, [replaceDoc, closeFolder])
+  }, [replaceDoc, closeFolder, okToLeave])
+
+  /** Open a file; Chrome and Edge remember which file it was, so Save writes back to it. */
+  const openFile = useCallback(async () => {
+    if (!canPickFile || !isTopWindow) { fileRef.current?.click(); return }
+    try {
+      const h = await pickOpenFile()
+      if (h) readFile(await h.getFile(), h)
+    } catch { fileRef.current?.click() }
+  }, [readFile])
 
   /** Show an opened folder: its first file, the file tree, and a search index built in the background. */
   const indexJob = useRef<{ cancelled: boolean } | null>(null)
-  const loadWorkspace = useCallback(async (w: Workspace | null, start?: string, zipBlob?: Blob) => {
+  /**
+   * `reload`: the same folder read again after a file was added or saved into it. Drafts,
+   * search words and filters carry over, and there's no "Opened" message.
+   */
+  const loadWorkspace = useCallback(async (w: Workspace | null, start?: string, zipBlob?: Blob, reload = false) => {
     if (!w) return
     if (!w.docs.length) { setToast({ msg: `There are no Markdown files in ${w.name}.` }); return }
     const old = wsRef.current
+    if (!reload && !okToLeave(true)) return
     if (old && old !== w) releaseWorkspace(old)
     if (indexJob.current) indexJob.current.cancelled = true
+    // Drafts belong to the old folder id; a reload moves them across, a new folder drops them.
+    const moved = new Map<string, Doc>()
+    if (reload && old) for (const [k, d] of draftsRef.current) if (k.startsWith(old.id + ':')) moved.set(w.id + k.slice(String(old.id).length), d)
+    draftsRef.current = moved
+    setDraftCount(moved.size)
     wsRef.current = w
-    setWs(w); setScan(null); setQuery(''); setFilters({})
+    setWs(w); setScan(null)
+    if (!reload) { setQuery(''); setFilters({}) }
     const first = start && w.files.has(start) ? start : startFile(w)!
-    const prev = docRef.current
-    if (await openPath(first, { history: 'replace', force: true })) {
+    const prev = liveDoc()
+    if (await openPath(first, { history: 'replace', force: true }) && !reload) {
       setToast({ msg: `Opened ${w.name} · ${w.docs.length.toLocaleString()} Markdown file${w.docs.length === 1 ? '' : 's'}`, undo: prev.path ? undefined : prev })
     }
     if (w.handle) addRecent({ kind: 'folder', name: w.name, handle: w.handle, path: first }).then(setRecent)
     else if (w.source === 'zip' && zipBlob) addRecent({ kind: 'zip', name: w.name, blob: zipBlob, path: first }).then(setRecent)
+    scanWorkspace(w)
+  }, [openPath, okToLeave, liveDoc]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Build the search index and the OKF analysis in the background (again after a save). */
+  const scanWorkspace = async (w: Workspace) => {
+    if (indexJob.current) indexJob.current.cancelled = true
     const job = { cancelled: false }
     indexJob.current = job
     setIndexing({ done: 0, total: w.docs.length })
@@ -563,7 +741,7 @@ export default function App() {
     } catch (e) {
       if (!job.cancelled) { setIndexing(null); setToast({ msg: 'Could not read every file in the folder: ' + String((e as Error)?.message ?? e) }) }
     }
-  }, [openPath])
+  }
 
   /** Open a .zip archive as a folder (for example an OKF bundle). */
   const openZipRef = useRef<(f: Blob & { name: string }, start?: string) => void>(() => {})
@@ -593,6 +771,7 @@ export default function App() {
     r = (await listRecent()).find((x) => x.id === r.id) ?? r
     if (r.kind === 'file') {
       if (r.text === undefined) return
+      if (!okToLeave(true)) return
       closeFolder()
       replaceDoc({ name: r.name, text: r.text }, `Opened ${r.name}`)
       addRecent({ kind: 'file', name: r.name, text: r.text }).then(setRecent)
@@ -603,14 +782,14 @@ export default function App() {
     if (!(await ensurePermission(r.handle))) { setToast({ msg: `Access to ${r.name} wasn't allowed.` }); return }
     try { loadWorkspace(await fromDirectoryHandle(r.handle), r.path) }
     catch { setToast({ msg: `Could not open ${r.name}. It may have been moved or deleted.` }); removeRecent(r.id).then(setRecent) }
-  }, [closeFolder, replaceDoc, loadWorkspace])
+  }, [closeFolder, replaceDoc, loadWorkspace, okToLeave])
 
   /* Files opened from the operating system when the app is installed (file handlers). */
   useEffect(() => {
     const lq = (window as any).launchQueue
     lq?.setConsumer?.(async (params: { files?: FileSystemFileHandle[] }) => {
       const h = params.files?.[0]
-      if (h) readFile(await h.getFile())
+      if (h) readFile(await h.getFile(), h)
     })
   }, [readFile])
 
@@ -651,7 +830,10 @@ export default function App() {
         })().catch((err) => setToast({ msg: 'Could not open the folder: ' + String(err?.message ?? err) }))
       } else if (files.length > 1) {
         loadWorkspace(fromFileList(files.filter((f) => isMarkdownName(f.name))))
-      } else if (files[0]) readFile(files[0])
+      } else if (files[0]) {
+        // Chrome and Edge give a handle for a dropped file too, so it can be saved back.
+        Promise.resolve(handleP).then((h) => h, () => null).then((h) => readFile(files[0], h?.kind === 'file' ? (h as FileSystemFileHandle) : undefined))
+      }
     }
     window.addEventListener('dragenter', enter); window.addEventListener('dragover', over)
     window.addEventListener('dragleave', leave); window.addEventListener('drop', drop)
@@ -679,11 +861,24 @@ export default function App() {
   }, [])
   const openFolderRef = useRef<() => void>(() => {})
   openFolderRef.current = openFolder
+  const openFileRef = useRef<() => void>(() => {})
+  openFileRef.current = openFile
+  const newDocRef = useRef<() => void>(() => {})
+  const saveRef = useRef<(as: boolean) => void>(() => {})
+  const toggleEditRef = useRef<() => void>(() => {})
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); openFolderRef.current() }
-      else if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); fileRef.current?.click() }
+      // The editor has its own find (Ctrl+F), link (Ctrl+K) and plain paste (Ctrl+Shift+V).
+      const inEditor = !!(e.target as Element)?.closest?.('.cm-editor')
+      // Ctrl+Alt is AltGr on Windows (AltGr+N types "ń" in Polish), so the key itself must be "n" there.
+      if (mod && e.altKey && !e.shiftKey && e.code === 'KeyN' && (isMac || e.key.toLowerCase() === 'n')) { e.preventDefault(); newDocRef.current() }
+      else if (mod && !e.altKey && e.code === 'KeyS') { e.preventDefault(); saveRef.current(e.shiftKey) }
+      else if (mod && e.shiftKey && !e.altKey && e.code === 'KeyE') { e.preventDefault(); toggleEditRef.current() }
+      else if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); openFolderRef.current() }
+      else if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); openFileRef.current() }
+      else if (inEditor && mod && ['f', 'k', 'h', 'v'].includes(e.key.toLowerCase())) return
+      else if (inEditor && e.key === 'F3') return
       else if (mod && !e.shiftKey && e.key.toLowerCase() === 'f') {
         // A second Ctrl+F while the find box has focus falls through to the browser's own search.
         if (viewRef.current === 'graph' || (findOpenRef.current && (e.target as Element)?.closest?.('.find'))) return
@@ -701,7 +896,7 @@ export default function App() {
       }
       else if (mod && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); exportPdfRef.current() }
       else if (mod && e.shiftKey && e.key.toLowerCase() === 'v') { e.preventDefault(); setPasteOpen(true) }
-      else if (e.key === 'Escape') { setDrawer(false); setPasteOpen(false); setFind(null) }
+      else if (e.key === 'Escape' && !inEditor) { setDrawer(false); setPasteOpen(false); setFind(null) }
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
@@ -721,7 +916,7 @@ export default function App() {
 
   /** Make sure the rendered article is on screen before exporting it. */
   const ensurePreview = useCallback(async () => {
-    if (view !== 'preview') { setView('preview'); await new Promise((r) => setTimeout(r, 350)) }
+    if (view !== 'preview' && view !== 'edit') { setView('preview'); await new Promise((r) => setTimeout(r, 350)) }
     return articleRef.current
   }, [view])
 
@@ -772,6 +967,396 @@ export default function App() {
 
   exportPdfRef.current = exportPdf
 
+  /* ---------- editing ---------- */
+
+  const newDoc = useCallback((template?: string) => {
+    if (!okToLeave(false)) return
+    const prev = liveDoc()
+    const t = template ? TEMPLATES[template] : undefined
+    const next: Doc = { name: t?.name ?? 'Untitled.md', text: t?.text() ?? '', saved: null, isNew: true }
+    record(next, 'push')
+    viewRef.current = 'edit'
+    showDoc(next)
+    if (!isHomeDoc(prev) && !(prev.isNew && !prev.text.trim())) setToast({ msg: 'New document', undo: prev })
+  }, [okToLeave, liveDoc, record, showDoc])
+  newDocRef.current = () => newDoc()
+
+  const startEditing = useCallback(() => {
+    if (isHomeDoc(docRef.current)) { newDoc(); return }
+    setFind(null)
+    setView('edit')
+    if (layRef.current === 'preview') setLayout('split')
+  }, [newDoc])
+  toggleEditRef.current = () => (viewRef.current === 'edit' ? setView('preview') : startEditing())
+
+  /** A file name for a document that doesn't have one yet: from its title or first heading. */
+  const suggestName = (d: Doc) => {
+    if (!d.isNew && d.name !== 'pasted.md' && d.name !== SAMPLE_NAME) return /\.\w+$/.test(d.name) ? d.name : d.name + '.md'
+    const f = extractFrontmatter(d.text)
+    const h = /^\s{0,3}#\s+(.+?)\s*#*\s*$/m.exec(d.text)?.[1]
+    const t = (typeof f?.data?.title === 'string' && f.data.title) || h || ''
+    if (!t && d.isNew && d.name !== 'Untitled.md') return d.name
+    return (t ? baseName(t, '') : 'Untitled') + '.md'
+  }
+
+  const saving = useRef(false)
+  /** Save back to the file; Save as (or a document without a file) asks where. Browsers without that download a copy. */
+  const save = useCallback(async (as = false) => {
+    if (saving.current) return false
+    const d = liveDoc()
+    const w = wsRef.current
+    if (!isTopWindow) { setToast({ msg: 'Saving works on markdown.kagitha.com. Here you can copy the Markdown from Export.' }); return false }
+    if (!as && !isDirty(d)) { setToast({ msg: d.handle || d.path ? 'No changes to save.' : 'No changes to save. Save as makes a copy.' }); return true }
+    const text = d.text
+    const mark = (patch: Partial<Doc>) => setDoc((cur) => ({ ...cur, ...patch, saved: text, isNew: false }))
+    saving.current = true
+    try {
+      if (!as) {
+        const wf = d.path && w ? w.files.get(d.path) : undefined
+        if (wf?.handle && w?.handle) {
+          if (!(await ensureWrite(w.handle))) { setToast({ msg: `Saving into ${w.name} wasn't allowed.` }); return false }
+          await writeFile(wf.handle, text)
+          mark({})
+          setToast({ msg: `Saved ${d.path}` })
+          scanWorkspace(w)
+          return true
+        }
+        if (d.handle) {
+          if (!(await ensureWrite(d.handle))) { setToast({ msg: `Saving ${d.name} wasn't allowed.` }); return false }
+          await writeFile(d.handle, text)
+          mark({})
+          setToast({ msg: `Saved ${d.name}` })
+          addRecent({ kind: 'file', name: d.name, text }).then(setRecent)
+          return true
+        }
+      }
+      if (canSaveFiles) {
+        const h = await pickSaveFile(suggestName(d), w?.handle ?? d.handle)
+        if (!h) return false
+        await writeFile(h, text)
+        // Saved into the opened folder: read the folder again and show the file there.
+        const rel: string[] | null = w?.handle ? await (w.handle as any).resolve(h).catch(() => null) : null
+        if (w?.handle && rel?.length) {
+          mark({})
+          loadWorkspace(await fromDirectoryHandle(w.handle), rel.join('/'), undefined, true)
+          setToast({ msg: `Saved ${rel.join('/')} in ${w.name}` })
+          return true
+        }
+        mark({ name: h.name, handle: h, path: undefined })
+        setToast({ msg: `Saved ${h.name}` })
+        addRecent({ kind: 'file', name: h.name, text }).then(setRecent)
+        return true
+      }
+      const name = suggestName(d)
+      downloadBlob(new Blob([text], { type: 'text/markdown;charset=utf-8' }), name)
+      mark({ name })
+      setToast({ msg: `Downloaded ${name}. This browser can't save over files, so each save downloads a copy.` })
+      return true
+    } catch (e) {
+      setToast({ msg: 'Could not save: ' + String((e as Error)?.message ?? e) })
+      return false
+    } finally { saving.current = false }
+  }, [liveDoc, loadWorkspace]) // eslint-disable-line react-hooks/exhaustive-deps
+  saveRef.current = (as) => { save(as) }
+
+  /** Add a new file to the opened folder (Chrome and Edge), then edit it. */
+  const createInFolder = useCallback(async (input: string) => {
+    const w = wsRef.current
+    if (!w?.handle) return
+    let path = input.replace(/\\/g, '/').replace(/^\/+/, '').trim()
+    if (!/\.(md|markdown|mdown|mkd|mdx|txt)$/i.test(path)) path += '.md'
+    const parts = path.split('/')
+    if (parts.some((p) => !p || p === '.' || p === '..' || /[<>:"|?*\u0000-\u001f]/.test(p))) { setToast({ msg: `“${input}” isn't a valid file name.` }); return }
+    if (w.files.has(path)) { setToast({ msg: `${path} already exists.` }); return }
+    setNameDialog(null)
+    try {
+      if (!(await ensureWrite(w.handle))) { setToast({ msg: `Adding files to ${w.name} wasn't allowed.` }); return }
+      const stem = parts[parts.length - 1].replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').trim()
+      const heading = stem ? stem[0].toUpperCase() + stem.slice(1) : 'Untitled'
+      await createFileIn(w.handle, path, `# ${heading}\n\n`)
+      viewRef.current = 'edit'
+      await loadWorkspace(await fromDirectoryHandle(w.handle), path, undefined, true)
+      setView('edit')
+      setToast({ msg: `Created ${path}` })
+    } catch (e) {
+      setToast({ msg: 'Could not create the file: ' + String((e as Error)?.message ?? e) })
+    }
+  }, [loadWorkspace])
+
+  const onEditorChange = useCallback((text: string, key: number) => {
+    if (key !== docKeyRef.current) return
+    setDoc((d) => (d.text === text ? d : { ...d, text }))
+  }, [])
+  const onEditorReady = useCallback((api: EditorApi | null) => { edRef.current = api }, [])
+
+  const FAIL: Record<string, string> = {
+    clear: 'Select the text to clear first.',
+    taskDone: 'Put the cursor on a task list item (- [ ]).',
+    delRow: 'Put the cursor in a row below the table header.',
+    delCol: 'Put the cursor in a table with more than one column.',
+  }
+  /** Run an editor command from the menu bar or the toolbar. */
+  const exec = useCallback((id: string) => {
+    const api = edRef.current
+    if (!api) return
+    if (layRef.current === 'preview') setLayout('split')
+    if (!api.exec(id)) {
+      const table = ['rowAbove', 'rowBelow', 'colLeft', 'colRight', 'alignLeft', 'alignCenter', 'alignRight', 'formatTable']
+      setToast({ msg: FAIL[id] ?? (table.includes(id) ? 'Put the cursor inside a table first.' : 'That doesn’t apply here.') })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* Warn before closing the tab with changes that would be lost (new documents are kept in the browser). */
+  useEffect(() => {
+    const before = (e: BeforeUnloadEvent) => {
+      const d = docRef.current
+      if ((isDirty(d) && (d.handle || d.path || d.text.length >= MAX_SAVE)) || draftsRef.current.size) { e.preventDefault(); e.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', before)
+    return () => window.removeEventListener('beforeunload', before)
+  }, [])
+
+  /* ---------- keeping the editor and the preview in step ---------- */
+  /** Which side the person is scrolling; the other one follows. */
+  const driver = useRef<'editor' | 'preview'>('editor')
+  /** Scroll positions set by syncing, so their scroll events aren't taken for the person's. */
+  const echo = useRef({ editor: -1, preview: -1 })
+  const lineEls = useRef<{ el: HTMLElement; line: number }[] | null>(null)
+  const blocks = () => {
+    if (!lineEls.current) {
+      lineEls.current = Array.from(articleRef.current?.querySelectorAll<HTMLElement>('[data-line]') ?? [])
+        .map((el) => ({ el, line: +(el.dataset.line ?? 0) }))
+        .filter((b) => b.line > 0)
+    }
+    return lineEls.current
+  }
+  const syncRef = useRef<(from: 'editor' | 'preview') => void>(() => {})
+  syncRef.current = (from) => {
+    const api = edRef.current, pane = mainRef.current
+    if (!api || !pane || !syncScroll || layRef.current !== 'split' || viewRef.current !== 'edit') return
+    const list = blocks()
+    if (!list.length) return
+    const paneTop = pane.getBoundingClientRect().top - pane.scrollTop
+    const top = (b: { el: HTMLElement }) => b.el.getBoundingClientRect().top - paneTop - 16
+    if (from === 'editor') {
+      const line = api.topLine()
+      let i = -1
+      for (let lo = 0, hi = list.length - 1; lo <= hi;) { const mid = (lo + hi) >> 1; if (list[mid].line <= line) { i = mid; lo = mid + 1 } else hi = mid - 1 }
+      let y: number
+      if (i < 0) y = 0
+      else {
+        const a = list[i], b = list[i + 1]
+        const ya = top(a), yb = b ? top(b) : pane.scrollHeight
+        const la = a.line, lb = b ? b.line : la + Math.max(1, line - la + 1)
+        y = ya + (yb - ya) * Math.min(1, (line - la) / Math.max(1, lb - la))
+      }
+      if (line <= 1.01) y = 0
+      const max = pane.scrollHeight - pane.clientHeight
+      pane.scrollTop = Math.max(0, Math.min(max, y))
+      echo.current.preview = pane.scrollTop
+    } else {
+      const y = pane.scrollTop
+      let i = -1
+      for (let lo = 0, hi = list.length - 1; lo <= hi;) { const mid = (lo + hi) >> 1; if (top(list[mid]) <= y) { i = mid; lo = mid + 1 } else hi = mid - 1 }
+      let line = 1
+      if (i >= 0) {
+        const a = list[i], b = list[i + 1]
+        const ya = top(a), yb = b ? top(b) : pane.scrollHeight
+        line = a.line + (b ? (b.line - a.line) : 1) * Math.min(1, (y - ya) / Math.max(1, yb - ya))
+      }
+      if (y <= 0) line = 1
+      api.scrollToLine(line)
+    }
+  }
+  const syncFrame = useRef(0)
+  const onEditorScroll = useCallback(() => {
+    if (driver.current !== 'editor' || syncFrame.current) return
+    syncFrame.current = requestAnimationFrame(() => { syncFrame.current = 0; syncRef.current('editor') })
+  }, [])
+  useEffect(() => {
+    const pane = mainRef.current
+    if (!pane || view !== 'edit') return
+    const onScroll = () => {
+      if (Math.abs(pane.scrollTop - echo.current.preview) < 2) return
+      if (driver.current !== 'preview' || syncFrame.current) return
+      syncFrame.current = requestAnimationFrame(() => { syncFrame.current = 0; syncRef.current('preview') })
+    }
+    pane.addEventListener('scroll', onScroll, { passive: true })
+    return () => pane.removeEventListener('scroll', onScroll)
+  }, [view])
+  // The editor re-measures and catches up after being hidden or resized.
+  useEffect(() => { if (view === 'edit') requestAnimationFrame(() => { edRef.current?.refresh(); syncRef.current('editor') }) }, [view, lay])
+
+  /** Double-click in the preview: put the editor's cursor on that block. */
+  const onPreviewDouble = useCallback((e: React.MouseEvent) => {
+    if (viewRef.current !== 'edit' || layRef.current === 'preview') return
+    let el = e.target as HTMLElement | null
+    while (el && el !== articleRef.current && !el.dataset?.line) el = el.parentElement
+    const line = el?.dataset?.line
+    if (line) { driver.current = 'editor'; edRef.current?.goto(+line) }
+  }, [])
+
+  /* ---------- the menu bar ---------- */
+  const headingNow = cursor ? (/^\s{0,3}(#{1,6})(\s|$)/.exec(cursor.text)?.[1].length ?? 0) : 0
+  const ed = (label: string, id: string, extra: Partial<Exclude<MenuItem, '-'>> = {}): MenuItem => ({ label, keys: KEYS[id.split(':')[0]], run: () => exec(id), ...extra })
+  const canFolderFile = !!ws?.handle && isTopWindow
+  const menus: MenuDef[] = [
+    {
+      label: 'File',
+      items: [
+        { label: 'New document', icon: 'newfile', keys: KEYS.new, run: () => newDoc() },
+        {
+          label: 'New from template', sub: [
+            { label: 'Note with front matter', run: () => newDoc('note') },
+            { label: 'README', run: () => newDoc('readme') },
+            { label: 'OKF concept file', run: () => newDoc('okf') },
+          ],
+        },
+        {
+          label: 'New file in folder…', run: () => setNameDialog(dirOf(doc.path ?? '') + 'untitled.md'), disabled: !canFolderFile,
+          hint: canFolderFile ? undefined : ws ? 'Needs a folder opened in Chrome or Edge' : 'Open a folder first',
+        },
+        '-',
+        { label: 'Open file…', icon: 'file', keys: KEYS.open, run: openFile },
+        { label: 'Open folder…', icon: 'folder', keys: KEYS.openFolder, run: openFolder },
+        '-',
+        { label: 'Save', icon: 'save', keys: KEYS.save, run: () => save(false) },
+        { label: 'Save as…', keys: KEYS.saveAs, run: () => save(true) },
+        { label: 'Download .md', icon: 'download', run: exportMd, disabled: !isTopWindow },
+        '-',
+        { label: 'Export PDF', icon: 'pdf', keys: KEYS.print, run: exportPdf },
+        { label: 'Export HTML', icon: 'code', run: exportHtml, disabled: !isTopWindow },
+        { label: 'Copy as formatted text', icon: 'rich', run: copyFormatted },
+        '-',
+        { label: 'Close editor', icon: 'eye', keys: KEYS.toggleEdit, run: () => setView('preview') },
+      ],
+    },
+    {
+      label: 'Edit',
+      items: [
+        ed('Undo', 'undo', { icon: 'undo' }), ed('Redo', 'redo', { icon: 'redo' }),
+        '-',
+        ed('Select all', 'selectAll'),
+        '-',
+        ed('Find', 'find', { icon: 'search' }), ed('Replace', 'replace'), ed('Go to line…', 'gotoLine'),
+        '-',
+        ed('Duplicate line', 'duplicateLine'), ed('Move line up', 'moveLineUp'), ed('Move line down', 'moveLineDown'), ed('Delete line', 'deleteLine'),
+        ed('Comment out', 'comment', { hint: '<!-- hidden in the preview -->' }),
+      ],
+    },
+    {
+      label: 'Format',
+      items: [
+        ed('Bold', 'bold', { icon: 'bold' }), ed('Italic', 'italic', { icon: 'italic' }), ed('Strikethrough', 'strike', { icon: 'strike' }),
+        ed('Inline code', 'code', { icon: 'inline' }), ed('Inline math', 'inlineMath', { icon: 'math' }),
+        '-',
+        ed('Link', 'link', { icon: 'link' }),
+        '-',
+        ed('Clear formatting', 'clear'),
+      ],
+    },
+    {
+      label: 'Paragraph',
+      items: [
+        ed('Paragraph', 'p', { radio: true, checked: headingNow === 0 }),
+        ...[1, 2, 3, 4, 5, 6].map((n) => ed('Heading ' + n, 'h' + n, { radio: true, checked: headingNow === n })),
+        '-',
+        ed('Increase heading level', 'headingUp'), ed('Decrease heading level', 'headingDown'),
+        '-',
+        ed('Bulleted list', 'ul', { icon: 'ul' }), ed('Numbered list', 'ol', { icon: 'ol' }), ed('Task list', 'task', { icon: 'task' }),
+        ed('Mark task done / not done', 'taskDone'), ed('Quote', 'quote', { icon: 'quote' }),
+        '-',
+        ed('Indent', 'indent'), ed('Outdent', 'outdent'),
+        '-',
+        ed('Insert paragraph before', 'paragraphBefore'), ed('Insert paragraph after', 'paragraphAfter'),
+      ],
+    },
+    {
+      label: 'Insert',
+      items: [
+        ed('Link', 'link', { icon: 'link' }), ed('Link reference', 'linkRef'), ed('Image', 'image', { icon: 'image' }), ed('Footnote', 'footnote'),
+        '-',
+        {
+          label: 'Table', icon: 'table', sub: [[2, 2], [3, 3], [4, 4], [5, 6]].map(([c, r]) => ed(`${c} columns × ${r} rows`, `table:${c}x${r + 1}`)),
+        },
+        ed('Code block', 'codeBlock', { icon: 'codeblock' }), ed('Math block', 'mathBlock', { icon: 'math' }), ed('Diagram (Mermaid)', 'mermaid', { icon: 'graph' }),
+        {
+          label: 'Alert', icon: 'alert', sub: ['Note', 'Tip', 'Important', 'Warning', 'Caution'].map((k) => ed(k, 'alert:' + k.toLowerCase())),
+        },
+        ed('Collapsible section', 'details'), ed('Horizontal line', 'hr', { icon: 'hr' }),
+        '-',
+        ed('Table of contents', 'toc', { hint: 'Links to the headings' }),
+        ed('Front matter', 'frontMatter', { hint: 'title, date, tags' }),
+        ed('OKF front matter', 'okfFrontMatter', { hint: 'type, status, generated' }),
+        ed('Today’s date', 'date'),
+      ],
+    },
+    {
+      label: 'Table',
+      items: [
+        ed('Insert table', 'table:3x3', { icon: 'table' }),
+        '-',
+        ed('Add row above', 'rowAbove'), ed('Add row below', 'rowBelow'), ed('Add column left', 'colLeft'), ed('Add column right', 'colRight'),
+        '-',
+        ed('Delete row', 'delRow'), ed('Delete column', 'delCol'),
+        '-',
+        ed('Align column left', 'alignLeft'), ed('Align column center', 'alignCenter'), ed('Align column right', 'alignRight'),
+        '-',
+        ed('Tidy table', 'formatTable', { hint: 'Line up the columns' }),
+      ],
+    },
+    {
+      label: 'View',
+      items: [
+        { label: narrow ? 'Editor' : 'Editor only', radio: true, checked: lay === 'write', run: () => setLayout('write') },
+        ...(narrow ? [] : [{ label: 'Editor and preview', radio: true, checked: lay === 'split', run: () => setLayout('split') }]),
+        { label: narrow ? 'Preview' : 'Preview only', radio: true, checked: lay === 'preview', run: () => setLayout('preview') },
+        '-',
+        ...(narrow ? [] : [{ label: 'Scroll together', checked: syncScroll, run: () => setSyncScroll((v) => !v) }]),
+        { label: 'Line numbers', checked: lineNums, run: () => setLineNums((v) => !v) },
+        { label: 'Wrap long lines', checked: wrap, run: () => setWrap((v) => !v) },
+        ...(narrow ? [] : [{ label: 'Sidebar', checked: edSide, run: () => setEdSide((v) => !v), hint: 'Details and outline' }]),
+        '-',
+        {
+          label: 'Theme', sub: (['system', 'light', 'dark'] as Theme[]).map((t) => ({
+            label: t === 'system' ? 'Match the system' : t === 'light' ? 'Light' : 'Dark', radio: true, checked: theme === t, run: () => setTheme(t),
+          })),
+        },
+        '-',
+        { label: 'Reading view', icon: 'eye', keys: KEYS.toggleEdit, run: () => setView('preview') },
+      ],
+    },
+    {
+      label: 'Help',
+      items: [
+        { label: 'Keyboard shortcuts', icon: 'keyboard', run: () => setKeysOpen(true) },
+        { label: 'Markdown syntax guide', icon: 'link', run: () => window.open('https://www.markdownguide.org/basic-syntax/', '_blank', 'noopener') },
+        { label: 'OKF specification', icon: 'link', run: () => window.open('https://github.com/open-knowledge-format/open-knowledge-format', '_blank', 'noopener') },
+      ],
+    },
+  ]
+  const tools: ToolDef[][] = [
+    [{ id: 'undo', icon: 'undo', label: 'Undo', keys: KEYS.undo }, { id: 'redo', icon: 'redo', label: 'Redo', keys: KEYS.redo }],
+    [
+      { id: 'bold', icon: 'bold', label: 'Bold', keys: KEYS.bold }, { id: 'italic', icon: 'italic', label: 'Italic', keys: KEYS.italic },
+      { id: 'strike', icon: 'strike', label: 'Strikethrough', keys: KEYS.strike }, { id: 'code', icon: 'inline', label: 'Inline code', keys: KEYS.code },
+    ],
+    [
+      { id: 'link', icon: 'link', label: 'Link', keys: KEYS.link }, { id: 'image', icon: 'image', label: 'Image', keys: KEYS.image },
+      { id: 'table:3x3', icon: 'table', label: 'Table', keys: KEYS.table },
+    ],
+    [
+      { id: 'ul', icon: 'ul', label: 'Bulleted list', keys: KEYS.ul }, { id: 'ol', icon: 'ol', label: 'Numbered list', keys: KEYS.ol },
+      { id: 'task', icon: 'task', label: 'Task list', keys: KEYS.task }, { id: 'quote', icon: 'quote', label: 'Quote', keys: KEYS.quote },
+    ],
+    [
+      { id: 'codeBlock', icon: 'codeblock', label: 'Code block', keys: KEYS.codeBlock }, { id: 'mathBlock', icon: 'math', label: 'Math block', keys: KEYS.mathBlock },
+      { id: 'alert:note', icon: 'alert', label: 'Alert (note)' }, { id: 'hr', icon: 'hr', label: 'Horizontal line' },
+    ],
+    [{ id: 'find', icon: 'search', label: 'Find and replace', keys: KEYS.find }],
+  ]
+  const saveState = !dirty ? 'Saved' : doc.isNew ? 'Not saved yet' : 'Unsaved changes'
+
   const recentPanel = !ws && (
     <RecentPanel
       items={recent}
@@ -792,7 +1377,12 @@ export default function App() {
   }, [scan, filters])
 
   const onTocPick = useCallback((id: string) => {
-    setDrawer(false); setView('preview')
+    setDrawer(false)
+    if (viewRef.current === 'edit') {
+      // Editing: move the cursor to the heading (the preview follows).
+      const line = document.getElementById(id)?.dataset.line
+      if (line && layRef.current !== 'preview') { driver.current = 'editor'; edRef.current?.goto(+line); return }
+    } else setView('preview')
     requestAnimationFrame(() => scrollPaneTo(mainRef.current, document.getElementById(id)))
   }, [])
 
@@ -803,7 +1393,7 @@ export default function App() {
           key={ws.id}
           ws={ws} current={doc.path} query={query} onQuery={setQuery} scan={scan} indexing={indexing}
           filters={filters} onFilters={setFilters}
-          searchRef={searchRef} onClose={() => { closeFolder(); if (doc.path) goHome() }}
+          searchRef={searchRef} onClose={() => { if (!okToLeave(true)) return; closeFolder(); if (doc.path) goHome(true) }}
           onOpen={openFromPanel}
         />
       )}
@@ -825,26 +1415,30 @@ export default function App() {
   )
 
   return (
-    <div className={'app' + (ws ? ' has-ws' : '')}>
+    <div className={'app' + (ws ? ' has-ws' : '') + (view === 'edit' ? ' is-editing' : '')}>
       <header className="bar">
         <div className="brand">
           <a className="brand-home" href="https://kagitha.com" target="_blank" rel="noopener">kagitha</a>
           <span className="brand-sep" aria-hidden="true">/</span>
-          <button type="button" className="brand-name" onClick={goHome} title="Home">Markdown Viewer</button>
+          <button type="button" className="brand-name" onClick={() => goHome()} title="Home">Markdown Viewer</button>
         </div>
         <div className="file" title={doc.path && ws ? `${ws.name}/${doc.path}` : doc.name}>
           <span className="file-name">
             {doc.path && ws && <span className="file-dir">{ws.name}/{doc.path.slice(0, doc.path.length - doc.name.length)}</span>}
             {doc.name}
           </span>
+          {dirty && <span className="file-dirty" title={saveState} role="img" aria-label={saveState} />}
           {!isHome && (
-            <button type="button" className="file-close" onClick={goHome} title="Close file and go home" aria-label={`Close ${doc.name}`}>
+            <button type="button" className="file-close" onClick={() => goHome()} title="Close file and go home" aria-label={`Close ${doc.name}`}>
               <Icon name="close" />
             </button>
           )}
         </div>
         <div className="actions">
-          <button type="button" className="btn btn--primary" onClick={() => fileRef.current?.click()} title="Open a Markdown file or a .zip bundle (Ctrl+O)">
+          <button type="button" className="btn btn--new" onClick={() => newDoc()} title={`New document (${keyLabel(KEYS.new)})`} aria-label="New document">
+            <Icon name="plus" /><span className="btn-text">New</span>
+          </button>
+          <button type="button" className="btn btn--primary" onClick={openFile} title="Open a Markdown file or a .zip bundle (Ctrl+O)">
             <Icon name="file" /><span className="btn-text">Open</span>
           </button>
           <button type="button" className="btn btn--folder" onClick={openFolder} title="Open a folder (Ctrl+Shift+O)">
@@ -857,7 +1451,10 @@ export default function App() {
             <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')} title="Preview" aria-label="Preview">
               <span className="seg-ico"><Icon name="eye" /></span><span className="seg-text">Preview</span>
             </button>
-            <button type="button" aria-pressed={view === 'source'} onClick={() => setView('source')} title="Source" aria-label="Source">
+            <button type="button" aria-pressed={view === 'edit'} onClick={startEditing} title={`Edit (${keyLabel(KEYS.toggleEdit)})`} aria-label="Edit">
+              <span className="seg-ico"><Icon name="edit" /></span><span className="seg-text">Edit</span>
+            </button>
+            <button type="button" className="seg-source" aria-pressed={view === 'source'} onClick={() => setView('source')} title="Source" aria-label="Source">
               <span className="seg-ico"><Icon name="code" /></span><span className="seg-text">Source</span>
             </button>
             {ws && (
@@ -903,10 +1500,46 @@ export default function App() {
         />
       </header>
 
-      <div className="body">
+      {view === 'edit' && (
+        <MenuBar menus={menus}>
+          <Toolbar groups={tools} onRun={exec} block={headingNow} onBlock={(n) => exec(n ? 'h' + n : 'p')} />
+          <div className="mb-right">
+            <span className={'save-state' + (dirty ? ' is-dirty' : '')} role="status">{saveState}</span>
+            <button type="button" className="btn btn--sm btn--save" onClick={() => save(false)} title={`Save (${keyLabel(KEYS.save)})`} aria-label="Save">
+              <Icon name="save" /><span className="btn-text">Save</span>
+            </button>
+            <div className="seg seg--sm seg--layout" role="group" aria-label="Layout">
+              <button type="button" aria-pressed={lay === 'write'} onClick={() => setLayout('write')} title="Editor only" aria-label="Editor only"><Icon name="edit" /></button>
+              {!narrow && <button type="button" aria-pressed={lay === 'split'} onClick={() => setLayout('split')} title="Editor and preview" aria-label="Editor and preview"><Icon name="split" /></button>}
+              <button type="button" aria-pressed={lay === 'preview'} onClick={() => setLayout('preview')} title="Preview only" aria-label="Preview only"><Icon name="eye" /></button>
+            </div>
+          </div>
+        </MenuBar>
+      )}
+
+      <div className={'body' + (view === 'edit' ? ` body--edit lay-${lay}` + (edSide && !narrow ? ' with-side' : '') : '')}>
         <aside className="side" aria-label="Document details">{sidebar}</aside>
 
-        <div className={'main' + (view === 'graph' ? ' main--graph' : '') + (find && view !== 'graph' ? ' has-find' : '')} ref={mainRef} tabIndex={-1}>
+        {edMounted && (
+          <section
+            className={'editor-pane' + (view === 'edit' ? '' : ' is-hidden')} aria-label="Editor"
+            onWheel={() => { driver.current = 'editor' }} onPointerDown={() => { driver.current = 'editor' }}
+            onKeyDown={() => { driver.current = 'editor' }} onTouchStart={() => { driver.current = 'editor' }}
+          >
+            <Suspense fallback={<p className="editor-loading">Loading the editor…</p>}>
+              <Editor
+                key={docKey} docKey={docKey} initial={doc.text} wrap={wrap} lineNumbers={lineNums}
+                onChange={onEditorChange} onReady={onEditorReady} onScroll={onEditorScroll} onCursor={setCursor}
+              />
+            </Suspense>
+          </section>
+        )}
+
+        <div
+          className={'main' + (view === 'graph' ? ' main--graph' : '') + (find && view !== 'graph' ? ' has-find' : '')} ref={mainRef} tabIndex={-1}
+          onWheel={() => { driver.current = 'preview' }} onPointerDown={() => { driver.current = 'preview' }}
+          onKeyDown={() => { driver.current = 'preview' }} onTouchStart={() => { driver.current = 'preview' }}
+        >
           {view === 'graph' && ws ? (
             scan ? (
               <GraphView analysis={scan.analysis} current={doc.path} match={filterMatch} dark={dark} onOpen={(p) => { setView('preview'); openPath(p) }} />
@@ -915,21 +1548,22 @@ export default function App() {
           <>
           {find && (
             <FindBar
-              getRoot={getFindRoot} pane={mainRef} content={view === 'preview' ? html : srcHtml + view}
+              getRoot={getFindRoot} pane={mainRef} content={showsArticle ? html : srcHtml + view}
               request={find} big={bigDoc} onClose={closeFind}
               onSearchAll={ws ? searchAllFiles : undefined}
             />
           )}
           {partial && <div className="top-progress" role="progressbar" aria-label={`Loading the rest of ${doc.name}`}><i /></div>}
           <main className="reading">
-            {view === 'preview' && hasFm && (
+            {showsArticle && hasFm && (
               <div className="print-meta" dangerouslySetInnerHTML={{ __html: metaHtml(fm!.data) }} />
             )}
-            {view === 'preview' ? (
+            {showsArticle ? (
               <article
                 ref={articleRef}
                 className={'prose' + (!html ? ' is-loading' : '') + (showLoader ? ' is-stale' : '') + (bigDoc ? ' prose--big' : '')}
-                onClick={onArticleClick}
+                onClick={onArticleClick} onDoubleClick={onPreviewDouble}
+                title={view === 'edit' && lay === 'split' ? 'Double-click to edit here' : undefined}
                 dangerouslySetInnerHTML={{ __html: html }}
               />
             ) : (
@@ -951,11 +1585,15 @@ export default function App() {
       </div>
 
       <footer className="status">
+        {view === 'edit' && cursor && (
+          <span className="nowrap status-pos">Ln {cursor.line.toLocaleString()}, Col {cursor.col}{cursor.selected ? ` · ${cursor.selected.toLocaleString()} selected` : ''}</span>
+        )}
         <span className="nowrap">{stats.words.toLocaleString()} words</span>
         <span className="nowrap">{stats.minutes} min read</span>
         <span className="hide-sm">{lineCount.toLocaleString()} lines</span>
         {partial && <span className="nowrap status-busy" role="status">Loading the rest of the file…</span>}
         {ws && <span className="hide-sm nowrap">{ws.docs.length.toLocaleString()} files in {ws.name}</span>}
+        {draftCount > 0 && <span className="nowrap status-busy" title="Changes to other files in the folder that aren't saved yet">{draftCount} other file{draftCount === 1 ? '' : 's'} not saved</span>}
         {scan?.analysis.okf && <span className="hide-sm nowrap">OKF bundle{scan.analysis.okf.version ? ` v${scan.analysis.okf.version}` : ''}</span>}
         {installPrompt && (
           <button type="button" className="status-btn" onClick={install} title="Install the viewer as an app that works offline">
@@ -988,7 +1626,16 @@ export default function App() {
         </div>
       )}
 
-      {pasteOpen && <PasteDialog onClose={() => setPasteOpen(false)} onSubmit={(text) => { setPasteOpen(false); replaceDoc({ name: 'pasted.md', text }, 'Showing pasted Markdown') }} />}
+      {keysOpen && <ShortcutsDialog menus={menus} onClose={() => setKeysOpen(false)} />}
+      {nameDialog !== null && (
+        <NameDialog
+          title={`New file in ${ws?.name ?? 'the folder'}`}
+          note="A path inside the folder. Folders in the path are created if they don't exist."
+          initial={nameDialog} action="Create" onClose={() => setNameDialog(null)} onSubmit={createInFolder}
+        />
+      )}
+
+      {pasteOpen && <PasteDialog onClose={() => setPasteOpen(false)} onSubmit={(text) => { setPasteOpen(false); if (okToLeave(false)) replaceDoc({ name: 'pasted.md', text }, 'Showing pasted Markdown') }} />}
 
       {toast && (
         <div className="toast" role="status">

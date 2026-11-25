@@ -61,6 +61,9 @@ export function cleanArticle(article: HTMLElement): HTMLElement {
   copy.querySelectorAll('.code-copy').forEach((b) => b.remove())
   copy.querySelectorAll('.code-bar').forEach((b) => { if (!b.textContent?.trim()) b.remove() })
   copy.querySelectorAll('[data-error]').forEach((b) => b.removeAttribute('data-error'))
+  copy.querySelectorAll('[data-line]').forEach((b) => b.removeAttribute('data-line'))
+  // Long pages are grouped into chunks on screen; exports don't need them.
+  copy.querySelectorAll('.cv-chunk').forEach((c) => c.replaceWith(...Array.from(c.childNodes)))
   return copy
 }
 

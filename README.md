@@ -6,6 +6,16 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
 
 ## Features
 
+- **Write and edit Markdown** (CodeMirror 6, loaded the first time you edit). Click **Edit**, press Ctrl/Cmd+Shift+E, or **New** (Ctrl/Cmd+Alt+N) for a blank document.
+  - Menu bar: **File** (new, templates, new file in folder, open, save, save as, export), **Edit** (undo, find and replace, go to line, line moves), **Format**, **Paragraph** (paragraph, headings 1–6, heading level up/down, lists, task done, quote, indent), **Insert** (link, link reference, image, footnote, tables, code and math blocks, Mermaid diagram, GitHub alerts, collapsible section, horizontal line, table of contents, front matter, OKF front matter, date), **Table** (rows, columns, alignment, tidy), **View** and **Help** (keyboard shortcuts)
+  - Toolbar with a text-style picker and the common formatting buttons
+  - Editor and preview side by side (they scroll together; double-click the preview to jump the editor there), editor only, or preview only. On phones the two switch.
+  - Lists and quotes continue on Enter; Tab moves between table cells and adds a row at the end; pasting a URL over selected text makes a link
+  - Code blocks are highlighted in the editor for the same languages as the preview; front matter is highlighted as YAML
+  - **Save** (Ctrl/Cmd+S) writes back to the file in Chrome and Edge, including files in an opened folder; **Save as** (Ctrl/Cmd+Shift+S) picks a place. Other browsers download a copy.
+  - Unsaved changes to other files in a folder are kept while you move between files; the browser asks before closing a tab or opening something else over unsaved work
+  - New documents are kept in the browser until saved
+- GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) render as coloured callouts
 - Open a file by drag-and-drop, the **Open** button (Ctrl/Cmd+O) or **Paste** (Ctrl/Cmd+Shift+V)
 - **Find in the open file** with the search button or Ctrl/Cmd+F: every match highlighted, a count, Enter / Shift+Enter to step through (also in Source view; a second Ctrl/Cmd+F opens the browser's own search)
 - **Open a whole folder** with the **Folder** button (Ctrl/Cmd+Shift+O) or by dropping it on the window. Chrome and Edge use the File System Access API; other browsers use a folder picker.
@@ -28,7 +38,7 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
 - Mermaid diagrams (bundled, loaded only when a file contains one)
 - YAML frontmatter card, with errors reported by line and an OKF `type` badge
 - Outline that follows your scroll position
-- Preview and Source views
+- Preview, Edit and Source views
 - Light, dark and system themes
 - **Export menu**
   - PDF via the print dialog (Ctrl/Cmd+P), always light, with link URLs printed and a sensible file name
@@ -75,7 +85,12 @@ Or deploy from the command line: `npm i -g vercel && vercel --prod`.
 ```
 public/               og.png (social preview), app icons, robots.txt, sitemap.xml
 src/
-  App.tsx               toolbar, layout, file and folder loading, history, outline, diagrams
+  App.tsx               toolbar, layout, file and folder loading, history, outline, diagrams, saving, editor menus
+  editor.tsx            the CodeMirror editor and its command list (loaded on demand)
+  md-commands.ts        Markdown editing commands: headings, lists, tables, blocks, links
+  edit-menu.tsx         menu bar, toolbar, keyboard-shortcuts and file-name dialogs
+  edit-keys.ts          editor keyboard shortcuts (shared by the keymap and the menus)
+  code-languages.ts     languages highlighted inside code blocks in the editor
   markdown.ts           unified pipeline and Shiki setup (loaded on demand)
   frontmatter.ts        YAML frontmatter parsing and word count
   workspace.ts          opened folders: reading, path resolution, image blob URLs
@@ -100,6 +115,5 @@ src/
 
 ## Next
 
-- Split view to edit and preview (CodeMirror 6)
 - Export a bundle as a static website
 - Share links (needs a backend)

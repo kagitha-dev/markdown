@@ -18,14 +18,54 @@ import type { Root, Element } from 'hast'
 
 /* ---------- Rendering ---------- */
 
+const ALERTS = ['note', 'tip', 'important', 'warning', 'caution']
+
 const schema: SanitizeSchema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
+    // data-line: the source line of each top-level block, for keeping the editor and preview in step
+    '*': [...(defaultSchema.attributes?.['*'] ?? []), 'dataLine'],
     code: [['className', /^language-./, 'math-inline', 'math-display']],
-    div: [...(defaultSchema.attributes?.div ?? []), ['className', 'math', 'math-display']],
+    div: [...(defaultSchema.attributes?.div ?? []), ['className', 'math', 'math-display', 'markdown-alert', ...ALERTS.map((a) => 'markdown-alert-' + a)]],
+    p: [...(defaultSchema.attributes?.p ?? []), ['className', 'markdown-alert-title']],
     span: [...(defaultSchema.attributes?.span ?? []), ['className', 'math', 'math-inline']],
   },
+}
+
+/** GitHub alerts: a quote starting with [!NOTE], [!TIP], [!IMPORTANT], [!WARNING] or [!CAUTION]. */
+function remarkAlerts() {
+  return (tree: any) => {
+    visit(tree, 'blockquote', (node: any) => {
+      const p = node.children?.[0]
+      const t = p?.type === 'paragraph' ? p.children?.[0] : null
+      if (t?.type !== 'text') return
+      const m = /^\[!(note|tip|important|warning|caution)\][ \t]*(\n|$)/i.exec(t.value)
+      if (!m) return
+      const kind = m[1].toLowerCase()
+      t.value = t.value.slice(m[0].length)
+      if (!t.value) p.children.shift()
+      if (p.children[0]?.type === 'break') p.children.shift()
+      if (!p.children.length) node.children.shift()
+      node.data = { ...node.data, hName: 'div', hProperties: { className: ['markdown-alert', 'markdown-alert-' + kind] } }
+      node.children.unshift({
+        type: 'paragraph',
+        data: { hProperties: { className: ['markdown-alert-title'] } },
+        children: [{ type: 'text', value: kind[0].toUpperCase() + kind.slice(1) }],
+      })
+    })
+  }
+}
+
+/** Mark each top-level block with the line it starts on. */
+function remarkSourceLines() {
+  return (tree: any) => {
+    for (const n of tree.children ?? []) {
+      const line = n.position?.start?.line
+      if (!line || n.type === 'yaml' || n.type === 'html' || n.type === 'definition' || n.type === 'footnoteDefinition') continue
+      n.data = { ...n.data, hProperties: { ...n.data?.hProperties, dataLine: line } }
+    }
+  }
 }
 
 /** Turn ```mermaid blocks into placeholders before Shiki sees them. */
@@ -109,6 +149,8 @@ function getProcessor() {
         .use(remarkFrontmatter, ['yaml'])
         .use(remarkGfm)
         .use(remarkMath)
+        .use(remarkAlerts)
+        .use(remarkSourceLines)
         .use(remarkRehype, { allowDangerousHtml: true })
         .use(rehypeRaw)
         .use(rehypeSanitize, schema)

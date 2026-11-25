@@ -26,6 +26,30 @@ const paths: Record<string, string> = {
   archive: 'M4 4h16v4H4zM5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4',
   link: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1',
   eye: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  newfile: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 11.5v6M9 14.5h6',
+  edit: 'M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16zM13.5 6.5l4 4',
+  save: 'M5 3h11l5 5v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM7.5 3v5h8V3M7 21v-7h10v7',
+  undo: 'M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11',
+  redo: 'M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13',
+  bold: 'M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z',
+  italic: 'M10 5h8M6 19h8M14 5l-4 14',
+  strike: 'M4 12h16M16.5 7c-.6-1.3-2.2-2-4.4-2C9.6 5 8 6.2 8 8c0 1.5 1 2.4 2.8 3M8 16.5c.6 1.6 2.3 2.5 4.6 2.5 2.6 0 4.4-1.2 4.4-3.2 0-.8-.3-1.4-.8-1.8',
+  inline: 'M8 7l-5 5 5 5M16 7l5 5-5 5',
+  heading: 'M6 4v16M18 4v16M6 12h12',
+  ul: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
+  ol: 'M10 6h10M10 12h10M10 18h10M4 4.5h1.5V9M3.8 14.6c.3-.6 1-1 1.7-1 .9 0 1.5.6 1.5 1.3 0 1.2-3 2.1-3 3.6h3',
+  task: 'M3.5 4.5h5v5h-5zM3.5 14.5h5v5h-5zM12 7h9M12 17h9M4.8 17.2l1.2 1.2 2.2-2.6',
+  quote: 'M5 5v14M10 8h10M10 12h10M10 16h6',
+  image: 'M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15.5 9.5h.01',
+  table: 'M3 5h18v14H3zM3 10h18M3 14.5h18M9 5v14M15 5v14',
+  codeblock: 'M4 4h16v16H4zM9.5 9.5 7.5 12l2 2.5M14.5 9.5l2 2.5-2 2.5',
+  math: 'M18 5H6l6 7-6 7h12',
+  hr: 'M3 12h18M7 6.5h10M7 17.5h10',
+  split: 'M3 5h18v14H3zM12 5v14',
+  plus: 'M12 5v14M5 12h14',
+  dot: 'M12 12h.01',
+  keyboard: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10',
+  alert: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5.5M12 7.5V8',
   install:'M12 3v10M8 9l4 4 4-4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3',
 }
 export function Icon({ name }: { name: string }) {
@@ -33,6 +57,7 @@ export function Icon({ name }: { name: string }) {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d={paths[name]} />
+      {name === 'dot' && <circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none" />}
       {name === 'auto' && <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />}
     </svg>
   )
