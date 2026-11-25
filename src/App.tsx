@@ -17,6 +17,7 @@ import { Icon } from './icons'
 import { headOf, render } from './renderer'
 import { baseName, buildStandaloneHtml, copyRich, downloadBlob, escapeHtml, metaHtml } from './export'
 import { ExportMenu } from './export-menu'
+import { FindBar, type FindRequest } from './find-bar'
 
 type Theme = 'system' | 'light' | 'dark'
 type View = 'preview' | 'source' | 'graph'
@@ -228,6 +229,10 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [recent, setRecent] = useState<RecentEntry[]>([])
   const [installPrompt, setInstallPrompt] = useState<any>(null)
+  /** The find bar: null when closed; a new request each time it's asked for (focuses it, may carry selected words). */
+  const [find, setFind] = useState<FindRequest | null>(null)
+  const findOpenRef = useRef(false)
+  findOpenRef.current = !!find
 
   const dark = useResolvedDark(theme)
   const articleRef = useRef<HTMLElement>(null)
@@ -235,6 +240,8 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const sourceRef = useRef<HTMLDivElement>(null)
+  const getFindRoot = useCallback(() => (viewRef.current === 'preview' ? articleRef.current : viewRef.current === 'source' ? sourceRef.current : null), [])
   const wsRef = useRef(ws)
   wsRef.current = ws
   /** What to do once the next document has rendered: jump to a heading, or highlight search words. */
@@ -656,6 +663,20 @@ export default function App() {
 
   /* keyboard shortcuts */
   const exportPdfRef = useRef<() => void>(() => {})
+  const openFindRef = useRef<() => void>(() => {})
+  openFindRef.current = () => {
+    if (viewRef.current === 'graph') setView('preview')
+    const sel = window.getSelection()?.toString().trim() ?? ''
+    const inPage = !!window.getSelection()?.anchorNode?.parentElement?.closest('.reading')
+    setFind((f) => ({ n: (f?.n ?? 0) + 1, seed: inPage && sel && sel.length <= 120 && !sel.includes('\n') ? sel : undefined }))
+  }
+  const closeFind = useCallback(() => { setFind(null); mainRef.current?.focus({ preventScroll: true }) }, [])
+  const searchAllFiles = useCallback((q: string) => {
+    if (q) setQuery(q)
+    setFind(null)
+    if (window.matchMedia('(max-width: 900px)').matches) setDrawer(true)
+    requestAnimationFrame(() => { const s = document.querySelectorAll<HTMLInputElement>('.search input'); s[s.length - 1]?.focus(); s[s.length - 1]?.select() })
+  }, [])
   const openFolderRef = useRef<() => void>(() => {})
   openFolderRef.current = openFolder
   useEffect(() => {
@@ -663,6 +684,16 @@ export default function App() {
       const mod = e.metaKey || e.ctrlKey
       if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); openFolderRef.current() }
       else if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); fileRef.current?.click() }
+      else if (mod && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        // A second Ctrl+F while the find box has focus falls through to the browser's own search.
+        if (viewRef.current === 'graph' || (findOpenRef.current && (e.target as Element)?.closest?.('.find'))) return
+        e.preventDefault(); openFindRef.current()
+      }
+      else if (e.key === 'F3' && findOpenRef.current && !(e.target as Element)?.closest?.('.find')) {
+        e.preventDefault()
+        document.querySelector<HTMLButtonElement>(e.shiftKey ? '.find-prev' : '.find-prev + .find-btn')?.click()
+      }
+      else if (mod && e.key.toLowerCase() === 'k' && !wsRef.current) { e.preventDefault(); openFindRef.current() }
       else if (mod && e.key.toLowerCase() === 'k' && wsRef.current) {
         e.preventDefault()
         if (window.matchMedia('(max-width: 900px)').matches) setDrawer(true)
@@ -670,7 +701,7 @@ export default function App() {
       }
       else if (mod && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); exportPdfRef.current() }
       else if (mod && e.shiftKey && e.key.toLowerCase() === 'v') { e.preventDefault(); setPasteOpen(true) }
-      else if (e.key === 'Escape') { setDrawer(false); setPasteOpen(false) }
+      else if (e.key === 'Escape') { setDrawer(false); setPasteOpen(false); setFind(null) }
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
@@ -823,10 +854,25 @@ export default function App() {
             <Icon name="paste" /><span className="btn-text">Paste</span>
           </button>
           <div className="seg" role="group" aria-label="View">
-            <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button>
-            <button type="button" aria-pressed={view === 'source'} onClick={() => setView('source')}>Source</button>
-            {ws && <button type="button" aria-pressed={view === 'graph'} onClick={() => setView('graph')} title="Map of how the files link together">Graph</button>}
+            <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')} title="Preview" aria-label="Preview">
+              <span className="seg-ico"><Icon name="eye" /></span><span className="seg-text">Preview</span>
+            </button>
+            <button type="button" aria-pressed={view === 'source'} onClick={() => setView('source')} title="Source" aria-label="Source">
+              <span className="seg-ico"><Icon name="code" /></span><span className="seg-text">Source</span>
+            </button>
+            {ws && (
+              <button type="button" aria-pressed={view === 'graph'} onClick={() => setView('graph')} title="Graph: map of how the files link together" aria-label="Graph">
+                <span className="seg-ico"><Icon name="graph" /></span><span className="seg-text">Graph</span>
+              </button>
+            )}
           </div>
+          <button
+            type="button" className={'btn btn--icon' + (find ? ' is-on' : '')} aria-pressed={!!find}
+            onClick={() => (find ? closeFind() : openFindRef.current())}
+            title="Find in this file (Ctrl+F)" aria-label="Find in this file"
+          >
+            <Icon name="search" />
+          </button>
           <button type="button" className="btn btn--icon" onClick={cycleTheme} title={themeLabel} aria-label={themeLabel}>
             <Icon name={theme === 'system' ? 'auto' : theme === 'light' ? 'sun' : 'moon'} />
           </button>
@@ -860,13 +906,20 @@ export default function App() {
       <div className="body">
         <aside className="side" aria-label="Document details">{sidebar}</aside>
 
-        <div className={'main' + (view === 'graph' ? ' main--graph' : '')} ref={mainRef}>
+        <div className={'main' + (view === 'graph' ? ' main--graph' : '') + (find && view !== 'graph' ? ' has-find' : '')} ref={mainRef} tabIndex={-1}>
           {view === 'graph' && ws ? (
             scan ? (
               <GraphView analysis={scan.analysis} current={doc.path} match={filterMatch} dark={dark} onOpen={(p) => { setView('preview'); openPath(p) }} />
             ) : <p className="graph-msg">Reading files{indexing ? ` (${indexing.done} of ${indexing.total})` : ''}…</p>
           ) : (
           <>
+          {find && (
+            <FindBar
+              getRoot={getFindRoot} pane={mainRef} content={view === 'preview' ? html : srcHtml + view}
+              request={find} big={bigDoc} onClose={closeFind}
+              onSearchAll={ws ? searchAllFiles : undefined}
+            />
+          )}
           {partial && <div className="top-progress" role="progressbar" aria-label={`Loading the rest of ${doc.name}`}><i /></div>}
           <main className="reading">
             {view === 'preview' && hasFm && (
@@ -880,7 +933,7 @@ export default function App() {
                 dangerouslySetInnerHTML={{ __html: html }}
               />
             ) : (
-              <div className={'source' + (showLoader ? ' is-stale' : '')} dangerouslySetInnerHTML={{ __html: srcHtml }} />
+              <div ref={sourceRef} className={'source' + (showLoader ? ' is-stale' : '')} dangerouslySetInnerHTML={{ __html: srcHtml }} />
             )}
             {showLoader && (
               <div className="loader" role="status" aria-live="polite">

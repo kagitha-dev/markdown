@@ -403,6 +403,40 @@ body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(-
 @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } * { scroll-behavior: auto !important; } }
 
+/* ---------- find in this file ---------- */
+.main:focus { outline: none; }
+.find-wrap { position: sticky; top: 0; z-index: 20; height: 0; }
+.find { position: absolute; top: 10px; right: 16px; display: flex; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); box-shadow: 0 6px 24px rgb(0 0 0 / .10), 0 1px 3px rgb(0 0 0 / .06); }
+.dark .find { box-shadow: 0 6px 24px rgb(0 0 0 / .45); }
+.find-field { position: relative; display: flex; align-items: center; }
+.find-field svg { position: absolute; left: 9px; width: 16px; height: 16px; color: var(--muted); pointer-events: none; }
+.find-field input { width: 300px; height: 34px; padding: 0 92px 0 32px; border: 1px solid transparent; border-radius: 7px; background: var(--panel); color: var(--ink); font: 14px var(--sans); }
+.find-field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--bg); }
+.find-field input::placeholder { color: var(--muted); }
+.find-count { position: absolute; right: 10px; font: 12px/1 var(--sans); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; pointer-events: none; }
+.find-count.is-none { color: var(--danger); }
+.find-btn { display: inline-grid; place-items: center; width: 32px; height: 32px; flex: none; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); cursor: pointer; }
+.find-btn:hover:not(:disabled) { background: var(--panel); color: var(--ink); }
+.find-btn:disabled { opacity: .4; cursor: default; }
+.find-btn svg { width: 17px; height: 17px; }
+.find-prev svg { transform: rotate(180deg); }
+.find-all { height: 32px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--accent); font: 500 13px var(--sans); white-space: nowrap; cursor: pointer; }
+.find-all:hover { background: var(--accent-soft); }
+::highlight(kmv-find) { background-color: color-mix(in srgb, #ffd43b 50%, transparent); color: inherit; }
+::highlight(kmv-find-current) { background-color: #ff9632; color: #14110f; }
+.dark ::highlight(kmv-find) { background-color: color-mix(in srgb, #ffd43b 30%, transparent); }
+mark.find-mark { background: color-mix(in srgb, #ffd43b 50%, transparent); color: inherit; padding: 0; border-radius: 2px; }
+.dark mark.find-mark { background: color-mix(in srgb, #ffd43b 30%, transparent); }
+mark.find-mark.find-current { background: #ff9632; color: #14110f; }
+@media (max-width: 600px) {
+  .find { left: 8px; right: 8px; top: 8px; }
+  .find-field { flex: 1; min-width: 0; }
+  .find-field input { width: 100%; font-size: 16px; }
+  .find-btn { width: 36px; height: 36px; }
+  .main.has-find .reading { padding-top: 72px; }
+}
+@media print { .find-wrap { display: none !important; } ::highlight(kmv-find), ::highlight(kmv-find-current) { background: none; color: inherit; } }
+
 /* ---------- responsive ---------- */
 @media (max-width: 900px) {
   .body { grid-template-columns: minmax(0, 1fr); }
@@ -426,6 +460,18 @@ body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(-
   .prose h2 { font-size: 24px; }
   .status { gap: 12px; }
   .status-right { white-space: nowrap; }
+}
+
+/* Phones: the view switcher shows icons so the find button fits in the row. */
+.seg-ico { display: none; }
+.seg-ico svg { width: 17px; height: 17px; display: block; }
+@media (max-width: 480px) {
+  .actions { gap: 4px; justify-content: space-between; }
+  .btn { width: 38px; min-width: 38px; }
+  .seg { flex: none; }
+  .seg button { flex: none; width: 36px; padding: 0; display: inline-grid; place-items: center; }
+  .seg-ico { display: block; }
+  .seg-text { display: none; }
 }
 
 /* ---------- print & export ---------- */

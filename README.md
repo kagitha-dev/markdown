@@ -7,6 +7,7 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
 ## Features
 
 - Open a file by drag-and-drop, the **Open** button (Ctrl/Cmd+O) or **Paste** (Ctrl/Cmd+Shift+V)
+- **Find in the open file** with the search button or Ctrl/Cmd+F: every match highlighted, a count, Enter / Shift+Enter to step through (also in Source view; a second Ctrl/Cmd+F opens the browser's own search)
 - **Open a whole folder** with the **Folder** button (Ctrl/Cmd+Shift+O) or by dropping it on the window. Chrome and Edge use the File System Access API; other browsers use a folder picker.
   - File tree in the side panel; the folder's `index.md` or `README.md` opens first
   - Links between files work (`../other.md#heading`, folder links, links without `.md`), and Back/Forward move between files
@@ -79,6 +80,7 @@ src/
   frontmatter.ts        YAML frontmatter parsing and word count
   workspace.ts          opened folders: reading, path resolution, image blob URLs
   file-tree.tsx         the folder tree
+  find-bar.tsx          find in the open file (CSS Custom Highlight API, <mark> fallback)
   side-panels.tsx       folder panel (contents, files, checks, filters, search), links panel, Recent panel
   search.ts             MiniSearch index
   scan.ts               reads a folder once, then builds the index and the OKF analysis (loaded on demand)

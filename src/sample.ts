@@ -21,6 +21,8 @@ Open a \`.md\` file and read it as a clean, formatted page. Your file is **opene
 
 The panel beside this page reads the YAML frontmatter at the top of the file and shows it as a tidy card. If a file uses Google's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF), its \`type\` field is highlighted.
 
+To find words in the open file, press the search button or **Ctrl/Cmd+F**: every match is highlighted and counted, and Enter steps to the next one.
+
 ## What renders
 
 | Feature | Syntax | Supported |
