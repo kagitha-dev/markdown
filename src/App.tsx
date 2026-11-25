@@ -12,7 +12,7 @@ import {
   assetUrl, badName, canPickDirectory, canPickFile, canSaveFiles, createFileIn, createFolder, dirOf, ensurePermission, ensureWrite, fromDirectoryHandle,
   moveAt, removeAt, writeAt,
   fromDroppedEntry, fromFileList, isMarkdownName, pickDirectory, pickOpenFile, pickSaveFile, releaseWorkspace, resolveLink,
-  startFile, writeFile, type Workspace,
+  startFile, fileNamed, writeFile, type Workspace,
 } from './workspace'
 import { SAMPLE, SAMPLE_NAME } from './sample'
 import { Icon } from './icons'
@@ -234,25 +234,41 @@ function flash(el: HTMLElement | null) {
   return el
 }
 
-/** Images with relative paths are read from the opened folder; without one, a note explains why they're missing. */
+/** Images with relative paths are read from the opened folder; without one, a button offers to open the file's folder. */
 function showLocalImages(root: HTMLElement, ws: Workspace | null, docPath: string | undefined, rootFallback: boolean) {
+  // Images that were waiting for the file's folder become images again once a folder is open.
+  if (ws) root.querySelectorAll<HTMLElement>('[data-ask-folder]').forEach((box) => {
+    const img = document.createElement('img')
+    img.className = 'local-img'
+    img.dataset.localSrc = box.dataset.src ?? ''
+    if (box.dataset.alt) img.alt = box.dataset.alt
+    box.replaceWith(img)
+  })
   root.querySelectorAll<HTMLImageElement>('img[data-local-src]').forEach((img) => {
     const src = img.dataset.localSrc ?? ''
     const file = ws && docPath !== undefined ? resolveLink(ws, docPath, src, rootFallback).file : null
     if (ws && file) {
       assetUrl(ws, file).then((u) => { if (img.isConnected) img.src = u }, () => missing(img, src, 'could not be read'))
-    } else missing(img, src, ws ? 'is not in this folder' : 'opens with its folder')
+    } else if (ws) missing(img, src, 'is not in this folder')
+    else missing(img, src, '', true)
   })
 }
-function missing(img: HTMLImageElement, src: string, why: string) {
-  const box = document.createElement('span')
-  box.className = 'img-missing'
-  box.title = src
+function missing(img: HTMLImageElement, src: string, why: string, askFolder = false) {
+  const box = document.createElement(askFolder ? 'button' : 'span')
+  box.className = askFolder ? 'img-missing img-missing--ask' : 'img-missing'
+  box.title = askFolder ? `Images are read from the file's folder on your computer. Nothing is uploaded.` : src
+  if (askFolder) (box as HTMLButtonElement).type = 'button'
+  if (askFolder) Object.assign(box.dataset, { askFolder: '', src, alt: img.alt })
   const label = document.createElement('strong')
   label.textContent = img.alt || src.split('/').pop() || 'Image'
   const note = document.createElement('span')
-  note.textContent = `${src} ${why}`
+  note.textContent = askFolder ? src : `${src} ${why}`
   box.append(label, note)
+  if (askFolder) {
+    const act = document.createElement('em')
+    act.textContent = "Show images: open this file's folder"
+    box.append(act)
+  }
   img.replaceWith(box)
 }
 
@@ -486,9 +502,17 @@ export default function App() {
     return () => { root.removeEventListener('scroll', onScroll); cancelAnimationFrame(frame) }
   }, [toc])
 
+  /* a folder opened for the same text (Show images): fill in the images that were waiting for it */
+  useEffect(() => {
+    if (ws && doc.path !== undefined && articleRef.current && showsArticle && articleRef.current.querySelector('[data-ask-folder]')) {
+      showLocalImages(articleRef.current, ws, doc.path, rootFallback())
+    }
+  }, [ws, doc.path]) // eslint-disable-line react-hooks/exhaustive-deps
+
   /* clicks inside the article: copy buttons, in-page links */
   const onArticleClick = useCallback((e: React.MouseEvent) => {
     const t = e.target as HTMLElement
+    if (t.closest('[data-ask-folder]')) { openFileFolderRef.current(); return }
     const copy = t.closest('.code-copy') as HTMLButtonElement | null
     if (copy) {
       const code = copy.closest('.code-wrap')?.querySelector('pre')?.textContent ?? ''
@@ -764,6 +788,7 @@ export default function App() {
   }
 
   const openFolder = useCallback(async () => {
+    wantNameRef.current = null
     if (!canPickDirectory) { folderRef.current?.click(); return }
     try {
       const handle = await pickDirectory()
@@ -772,6 +797,30 @@ export default function App() {
       setToast({ msg: 'Could not open the folder: ' + String((e as Error)?.message ?? e) })
     }
   }, [loadWorkspace])
+
+  /**
+   * A single file can't see the folder it came from, so its relative images can't be read.
+   * This asks for that folder (the picker starts next to the file in Chrome and Edge) and
+   * reopens the same file inside it, so images and links to other files work.
+   */
+  const wantNameRef = useRef<string | null>(null)
+  const openFileFolder = async () => {
+    const d = docRef.current
+    if (!canPickDirectory || !isTopWindow) { wantNameRef.current = d.name; folderRef.current?.click(); return }
+    try {
+      const dir = await pickDirectory(d.handle)
+      if (!dir) return
+      const w = await fromDirectoryHandle(dir)
+      const rel: string[] | null = d.handle ? await (dir as any).resolve(d.handle).catch(() => null) : null
+      const path = rel?.length ? rel.join('/') : fileNamed(w, d.name)
+      if (!path) setToast({ msg: `${d.name} isn't in ${w.name}, so its images still can't be shown.` })
+      loadWorkspace(w, path ?? undefined)
+    } catch (e) {
+      setToast({ msg: 'Could not open the folder: ' + String((e as Error)?.message ?? e) })
+    }
+  }
+  const openFileFolderRef = useRef(openFileFolder)
+  openFileFolderRef.current = openFileFolder
 
   const openRecent = useCallback(async (r: RecentEntry) => {
     // The stored entry knows which file was open last.
@@ -1731,7 +1780,13 @@ export default function App() {
         <input
           ref={folderRef} type="file" hidden multiple
           {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-          onChange={(e) => { const files = e.target.files; if (files?.length) loadWorkspace(fromFileList(files)); e.target.value = '' }}
+          onChange={(e) => {
+            const files = e.target.files
+            const want = wantNameRef.current
+            wantNameRef.current = null
+            if (files?.length) { const w = fromFileList(files); loadWorkspace(w, w && want ? fileNamed(w, want) ?? undefined : undefined) }
+            e.target.value = ''
+          }}
         />
       </header>
 

@@ -59,9 +59,10 @@ export function comparePaths(a: string, b: string) {
 
 export const canPickDirectory = typeof window !== 'undefined' && 'showDirectoryPicker' in window
 
-export async function pickDirectory(): Promise<FileSystemDirectoryHandle | null> {
+/** `startIn`: a file or folder the picker should open at (for example the open file, to pick its folder). */
+export async function pickDirectory(startIn?: FileSystemHandle): Promise<FileSystemDirectoryHandle | null> {
   try {
-    return await (window as any).showDirectoryPicker({ id: 'kmv-folder', mode: 'read' })
+    return await (window as any).showDirectoryPicker({ id: 'kmv-folder', mode: 'read', ...(startIn ? { startIn } : {}) })
   } catch (e) {
     if ((e as DOMException)?.name === 'AbortError') return null
     throw e
@@ -341,6 +342,12 @@ export function resolveLink(ws: Workspace, fromPath: string, href: string, rootF
 }
 
 /** The file to show first when a folder opens. */
+/** The Markdown file in the folder with this name, nearest the top (for reopening a single file inside its folder). */
+export function fileNamed(ws: Workspace, name: string): string | null {
+  const low = name.toLowerCase()
+  return ws.docs.filter((d) => (d.split('/').pop() ?? '').toLowerCase() === low).sort(comparePaths)[0] ?? null
+}
+
 export function startFile(ws: Workspace): string | null {
   return findFile(ws, '')?.path ?? ws.docs.find((d) => !d.includes('/')) ?? ws.docs[0] ?? null
 }
