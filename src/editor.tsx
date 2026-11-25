@@ -3,9 +3,9 @@
  * Commands are run by id, so the menu bar, the toolbar and the keyboard share one list.
  */
 import { useEffect, useRef } from 'react'
-import { Compartment, EditorState, Prec } from '@codemirror/state'
+import { Compartment, EditorState, Prec, StateField, type Range, type Text } from '@codemirror/state'
 import {
-  Decoration, MatchDecorator, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate,
+  Decoration, WidgetType, type DecorationSet,
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor,
   rectangularSelection, crosshairCursor, placeholder,
 } from '@codemirror/view'
@@ -203,18 +203,46 @@ class DataChip extends WidgetType {
   }
   ignoreEvent() { return false }
 }
-const dataMatcher = new MatchDecorator({
-  regexp: /data:image\/([a-z0-9.+-]+);base64,[A-Za-z0-9+/=]{40,}/gi,
-  decoration: (m) => Decoration.replace({ widget: new DataChip(m[1].replace('svg+xml', 'svg').replace('jpeg', 'jpg'), m[0].length) }),
-})
-const dataChips = ViewPlugin.fromClass(class {
-  chips: DecorationSet
-  constructor(view: EditorView) { this.chips = dataMatcher.createDeco(view) }
-  update(u: ViewUpdate) { this.chips = dataMatcher.updateDeco(u, this.chips) }
-}, {
-  decorations: (v) => v.chips,
+const DATA_RE = /data:image\/([a-z0-9.+-]+);base64,[A-Za-z0-9+/=]{40,}/gi
+function chipsIn(doc: Text, from: number, to: number, out: Range<Decoration>[]) {
+  for (let pos = from; pos <= to;) {
+    const line = doc.lineAt(pos)
+    if (line.length > 60) {
+      DATA_RE.lastIndex = 0
+      for (let m; (m = DATA_RE.exec(line.text));) {
+        out.push(Decoration.replace({ widget: new DataChip(m[1].replace('svg+xml', 'svg').replace('jpeg', 'jpg'), m[0].length) })
+          .range(line.from + m.index, line.from + m.index + m[0].length))
+      }
+    }
+    pos = line.to + 1
+  }
+}
+/* A state field, not a view plugin: CodeMirror only sees state decorations when it decides whether a line is
+   too long to draw in full. From a view plugin, a line holding an image stayed "long", so the editor left a big
+   estimated blank gap and drew only the middle of it, where the data: prefix (and so the chip) couldn't be found. */
+const dataChips = StateField.define<DecorationSet>({
+  create(state) {
+    const out: Range<Decoration>[] = []
+    chipsIn(state.doc, 0, state.doc.length, out)
+    return Decoration.set(out, true)
+  },
+  update(chips, tr) {
+    if (!tr.docChanged) return chips
+    // Recheck only the lines that changed; chips elsewhere just move.
+    const lines: [number, number][] = []
+    tr.changes.iterChangedRanges((_fa, _ta, fromB, toB) => {
+      lines.push([tr.state.doc.lineAt(fromB).from, tr.state.doc.lineAt(toB).to])
+    })
+    chips = chips.map(tr.changes)
+    for (const [from, to] of lines) {
+      const out: Range<Decoration>[] = []
+      chipsIn(tr.state.doc, from, to, out)
+      chips = chips.update({ filter: (f, t) => t < from || f > to, filterFrom: from, filterTo: to, add: out, sort: true })
+    }
+    return chips
+  },
   // The cursor steps over the whole thing, and deleting removes it in one go.
-  provide: (plugin) => EditorView.atomicRanges.of((view) => view.plugin(plugin)?.chips ?? Decoration.none),
+  provide: (f) => [EditorView.decorations.from(f), EditorView.atomicRanges.of((view) => view.state.field(f))],
 })
 
 export default function Editor(p: Props) {
