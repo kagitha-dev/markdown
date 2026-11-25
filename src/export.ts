@@ -69,10 +69,10 @@ export function cleanArticle(article: HTMLElement): HTMLElement {
 
 /* ---------- images from an opened folder ---------- */
 
-/** Images from a folder are shown with blob: URLs that only live in this tab, so embed them. */
+/** Images from a folder (blob: URLs that only live in this tab) or next to the page are embedded. */
 async function inlineImages(root: HTMLElement) {
   await Promise.all(
-    Array.from(root.querySelectorAll<HTMLImageElement>('img[src^="blob:"]')).map(async (img) => {
+    Array.from(root.querySelectorAll<HTMLImageElement>('img[src^="blob:"], img[data-local-src][src]')).map(async (img) => {
       try { img.src = await toDataUrl(await (await fetch(img.src)).blob()) } catch { /* leave as is */ }
       img.removeAttribute('data-local-src')
     }),

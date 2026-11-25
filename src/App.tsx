@@ -250,7 +250,12 @@ function showLocalImages(root: HTMLElement, ws: Workspace | null, docPath: strin
     if (ws && file) {
       assetUrl(ws, file).then((u) => { if (img.isConnected) img.src = u }, () => missing(img, src, 'could not be read'))
     } else if (ws) missing(img, src, 'is not in this folder')
-    else missing(img, src, '', true)
+    else {
+      // No folder: try the path from the site the page came from, as the first version did
+      // (the dev server serves files next to the project). If that fails, offer the file's folder.
+      img.onerror = () => { img.onerror = null; if (img.isConnected) missing(img, src, '', true) }
+      img.src = src
+    }
   })
 }
 function missing(img: HTMLImageElement, src: string, why: string, askFolder = false) {
@@ -504,7 +509,7 @@ export default function App() {
 
   /* a folder opened for the same text (Show images): fill in the images that were waiting for it */
   useEffect(() => {
-    if (ws && doc.path !== undefined && articleRef.current && showsArticle && articleRef.current.querySelector('[data-ask-folder]')) {
+    if (ws && doc.path !== undefined && articleRef.current && showsArticle && articleRef.current.querySelector('[data-ask-folder], img[data-local-src]')) {
       showLocalImages(articleRef.current, ws, doc.path, rootFallback())
     }
   }, [ws, doc.path]) // eslint-disable-line react-hooks/exhaustive-deps
