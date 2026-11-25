@@ -3,7 +3,7 @@
  * Commands are run by id, so the menu bar, the toolbar and the keyboard share one list.
  */
 import { useEffect, useRef } from 'react'
-import { Compartment, EditorState, Prec, StateField, type Range, type Text } from '@codemirror/state'
+import { Compartment, EditorState, Prec, StateField, Transaction, type Range, type Text } from '@codemirror/state'
 import {
   Decoration, WidgetType, type DecorationSet,
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor,
@@ -245,6 +245,23 @@ const dataChips = StateField.define<DecorationSet>({
   provide: (f) => [EditorView.decorations.from(f), EditorView.atomicRanges.of((view) => view.state.field(f))],
 })
 
+/* Typing or pasting right after an embedded image would add the letters to the image data (they'd vanish
+   into the chip and break the image), so the new text starts on a line of its own instead. */
+const keepOffImageData = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !(tr.isUserEvent('input') || tr.isUserEvent('paste'))) return tr
+  const chips = tr.startState.field(dataChips, false)
+  if (!chips) return tr
+  let hit = -1, n = 0, inserted = ''
+  tr.changes.iterChanges((fromA, toA, _fb, _tb, text) => {
+    n++
+    if (fromA !== toA) return
+    chips.between(fromA, fromA, (_f, to) => { if (to === fromA) { hit = fromA; inserted = text.toString() } })
+  })
+  if (n !== 1 || hit < 0 || inserted.startsWith('\n')) return tr
+  const insert = '\n' + inserted
+  return { changes: { from: hit, insert }, selection: { anchor: hit + insert.length }, scrollIntoView: true, userEvent: tr.annotation(Transaction.userEvent) }
+})
+
 export default function Editor(p: Props) {
   const host = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -292,7 +309,7 @@ export default function Editor(p: Props) {
           search({ top: true }),
           yamlFrontmatter({ content: markdown({ base: markdownLanguage, codeLanguages }) }),
           syntaxHighlighting(highlight),
-          dataChips,
+          dataChips, keepOffImageData,
           theme,
           placeholder('Start writing Markdown…  # for a heading, - for a list, or use the menus above.'),
           EditorView.contentAttributes.of({ 'aria-label': 'Markdown editor', spellcheck: 'true', autocorrect: 'off', autocapitalize: 'sentences' }),
