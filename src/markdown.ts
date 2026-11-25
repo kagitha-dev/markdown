@@ -22,6 +22,8 @@ const ALERTS = ['note', 'tip', 'important', 'warning', 'caution']
 
 const schema: SanitizeSchema = {
   ...defaultSchema,
+  // Images pasted into a file that has no folder to save them in are embedded as data: URLs.
+  protocols: { ...defaultSchema.protocols, src: [...(defaultSchema.protocols?.src ?? []), 'data'] },
   attributes: {
     ...defaultSchema.attributes,
     // data-line: the source line of each top-level block, for keeping the editor and preview in step

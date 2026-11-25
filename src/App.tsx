@@ -9,7 +9,8 @@ import { FileLinksPanel } from './side-panels'
 import { GraphView } from './graph-view'
 import { activeCount, matches, type Filters } from './filters'
 import {
-  assetUrl, canPickDirectory, canPickFile, canSaveFiles, createFileIn, dirOf, ensurePermission, ensureWrite, fromDirectoryHandle,
+  assetUrl, badName, canPickDirectory, canPickFile, canSaveFiles, createFileIn, createFolder, dirOf, ensurePermission, ensureWrite, fromDirectoryHandle,
+  moveAt, removeAt, writeAt,
   fromDroppedEntry, fromFileList, isMarkdownName, pickDirectory, pickOpenFile, pickSaveFile, releaseWorkspace, resolveLink,
   startFile, writeFile, type Workspace,
 } from './workspace'
@@ -20,7 +21,8 @@ import { baseName, buildStandaloneHtml, copyRich, downloadBlob, escapeHtml, meta
 import { ExportMenu } from './export-menu'
 import { FindBar, type FindRequest } from './find-bar'
 import type { CursorInfo, EditorApi } from './editor'
-import { MenuBar, NameDialog, ShortcutsDialog, Toolbar, type MenuDef, type MenuItem, type ToolDef } from './edit-menu'
+import { MenuBar, MoveDialog, NameDialog, ShortcutsDialog, Toolbar, type MenuDef, type MenuItem, type ToolDef } from './edit-menu'
+import type { TreeActions } from './file-tree'
 import { isMac, KEYS, keyLabel } from './edit-keys'
 
 /** The editor (CodeMirror) is loaded the first time someone edits. */
@@ -285,13 +287,14 @@ export default function App() {
   const [toc, setToc] = useState<TocItem[]>([])
   const [activeId, setActiveId] = useState('')
   const [drawer, setDrawer] = useState(false)
-  const [dragging, setDragging] = useState(false)
+  const [dragging, setDragging] = useState<false | 'open' | 'image'>(false)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [toast, setToast] = useState<{ msg: string; undo?: Doc } | null>(null)
   const [includeFm, setIncludeFm] = useState(() => store.get<boolean>('kmv.exportFm', true))
   const [busy, setBusy] = useState(false)
   const [ws, setWs] = useState<Workspace | null>(null)
   const [scan, setScan] = useState<Scan | null>(null)
+  const [panelKey, setPanelKey] = useState(0)
   const [filters, setFilters] = useState<Filters>({})
   const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null)
   const [query, setQuery] = useState('')
@@ -322,7 +325,6 @@ export default function App() {
   const edRef = useRef<EditorApi | null>(null)
   const [cursor, setCursor] = useState<CursorInfo | null>(null)
   const [keysOpen, setKeysOpen] = useState(false)
-  const [nameDialog, setNameDialog] = useState<string | null>(null)
   /** Unsaved changes to other files in the opened folder, by "folder id:path". */
   const draftsRef = useRef(new Map<string, Doc>())
   const [draftCount, setDraftCount] = useState(0)
@@ -584,11 +586,11 @@ export default function App() {
   }, [showDoc, okToLeave])
 
   /** Open a file from the opened folder. */
-  const openPath = useCallback(async (path: string, opts: { history?: 'push' | 'replace' | 'none'; hash?: string; terms?: string[]; href?: string; force?: boolean } = {}) => {
+  const openPath = useCallback(async (path: string, opts: { history?: 'push' | 'replace' | 'none'; hash?: string; terms?: string[]; href?: string; force?: boolean; fresh?: boolean } = {}) => {
     const w = wsRef.current
     const f = w?.files.get(path)
     if (!w || !f) return false
-    if (path === docRef.current.path && opts.history !== 'none' && !opts.force) {
+    if (path === docRef.current.path && opts.history !== 'none' && !opts.force && !opts.fresh) {
       setDrawer(false)
       if (viewRef.current !== 'preview' && viewRef.current !== 'edit') { pendingRef.current = { hash: opts.hash, terms: opts.terms, href: opts.href }; setView('preview'); return true }
       if (opts.href && articleRef.current) scrollPaneTo(mainRef.current, flash(findLink(articleRef.current, opts.href)))
@@ -709,17 +711,22 @@ export default function App() {
     // Drafts belong to the old folder id; a reload moves them across, a new folder drops them.
     const moved = new Map<string, Doc>()
     if (reload && old) for (const [k, d] of draftsRef.current) if (k.startsWith(old.id + ':')) moved.set(w.id + k.slice(String(old.id).length), d)
+    // Reading the same folder again keeps unsaved changes to the open file, too.
+    const live = liveDoc()
+    if (reload && live.path && isDirty(live) && w.files.has(live.path)) moved.set(draftKey(w, live.path), live)
     draftsRef.current = moved
     setDraftCount(moved.size)
     wsRef.current = w
+    // The folder panel keeps its tab and open folders when the same folder is read again.
+    if (!reload) setPanelKey(w.id)
     setWs(w); setScan(null)
     if (!reload) { setQuery(''); setFilters({}) }
     const first = start && w.files.has(start) ? start : startFile(w)!
     const prev = liveDoc()
-    if (await openPath(first, { history: 'replace', force: true }) && !reload) {
+    if (await openPath(first, { history: 'replace', force: !reload, fresh: true }) && !reload) {
       setToast({ msg: `Opened ${w.name} · ${w.docs.length.toLocaleString()} Markdown file${w.docs.length === 1 ? '' : 's'}`, undo: prev.path ? undefined : prev })
     }
-    if (w.handle) addRecent({ kind: 'folder', name: w.name, handle: w.handle, path: first }).then(setRecent)
+    if (w.handle) { if (reload) touchFolderPath(w.handle, first); else addRecent({ kind: 'folder', name: w.name, handle: w.handle, path: first }).then(setRecent) }
     else if (w.source === 'zip' && zipBlob) addRecent({ kind: 'zip', name: w.name, blob: zipBlob, path: first }).then(setRecent)
     scanWorkspace(w)
   }, [openPath, okToLeave, liveDoc]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -810,7 +817,15 @@ export default function App() {
   useEffect(() => {
     let depth = 0
     const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files')
-    const enter = (e: DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; setDragging(true) }
+    const onlyImages = (dt: DataTransfer | null) => {
+      const items = Array.from(dt?.items ?? []).filter((i) => i.kind === 'file')
+      return items.length > 0 && items.every((i) => i.type.startsWith('image/'))
+    }
+    const enter = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault(); depth++
+      setDragging(viewRef.current === 'edit' && onlyImages(e.dataTransfer) ? 'image' : 'open')
+    }
     const over = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault() }
     const leave = () => { depth = Math.max(0, depth - 1); if (!depth) setDragging(false) }
     const drop = (e: DragEvent) => {
@@ -818,6 +833,11 @@ export default function App() {
       e.preventDefault(); depth = 0; setDragging(false)
       const dt = e.dataTransfer
       if (!dt) return
+      // Images dropped while editing go into the document, where they were dropped.
+      if (viewRef.current === 'edit' && onlyImages(dt)) {
+        addImagesRef.current(Array.from(dt.files), edRef.current?.posAt(e.clientX, e.clientY) ?? null)
+        return
+      }
       // Entries and handles must be requested during the drop event itself.
       const item = Array.from(dt.items).find((i) => i.kind === 'file')
       const entry = item?.webkitGetAsEntry?.()
@@ -866,6 +886,7 @@ export default function App() {
   const newDocRef = useRef<() => void>(() => {})
   const saveRef = useRef<(as: boolean) => void>(() => {})
   const toggleEditRef = useRef<() => void>(() => {})
+  const addImagesRef = useRef<(files: File[], at?: number | null) => void>(() => {})
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
@@ -1066,9 +1087,9 @@ export default function App() {
     let path = input.replace(/\\/g, '/').replace(/^\/+/, '').trim()
     if (!/\.(md|markdown|mdown|mkd|mdx|txt)$/i.test(path)) path += '.md'
     const parts = path.split('/')
-    if (parts.some((p) => !p || p === '.' || p === '..' || /[<>:"|?*\u0000-\u001f]/.test(p))) { setToast({ msg: `“${input}” isn't a valid file name.` }); return }
+    if (parts.some(badName)) { setToast({ msg: `“${input}” isn't a valid file name.` }); return }
     if (w.files.has(path)) { setToast({ msg: `${path} already exists.` }); return }
-    setNameDialog(null)
+    setFileDialog(null)
     try {
       if (!(await ensureWrite(w.handle))) { setToast({ msg: `Adding files to ${w.name} wasn't allowed.` }); return }
       const stem = parts[parts.length - 1].replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').trim()
@@ -1082,6 +1103,211 @@ export default function App() {
       setToast({ msg: 'Could not create the file: ' + String((e as Error)?.message ?? e) })
     }
   }, [loadWorkspace])
+
+  /* ---------- managing files in the folder (Chrome and Edge) ---------- */
+  const canManage = !!ws?.handle && isTopWindow
+  type FileDialog =
+    | { kind: 'newFile' | 'newFolder'; dir: string }
+    | { kind: 'rename' | 'move'; path: string }
+  const [fileDialog, setFileDialog] = useState<FileDialog | null>(null)
+
+  /** Moving files rewrites links in other files, so their unsaved changes must be saved first. */
+  const unsavedInFolder = () => {
+    const d = liveDoc()
+    if (d.path && isDirty(d)) return d.path
+    const first = draftsRef.current.values().next().value
+    return first?.path ?? null
+  }
+  const writable = async (w: Workspace) => {
+    if (await ensureWrite(w.handle!)) return true
+    setToast({ msg: `Changing files in ${w.name} wasn't allowed.` })
+    return false
+  }
+  /** Read the folder again; the open file stays open (at its new path when it moved). */
+  const reread = async (w: Workspace, open?: string) => {
+    const next = await fromDirectoryHandle(w.handle!)
+    await loadWorkspace(next, open && next.files.has(open) ? open : undefined, undefined, true)
+  }
+
+  const createFolderAt = useCallback(async (input: string, dir: string) => {
+    const w = wsRef.current
+    if (!w?.handle) return
+    const path = (dir + input.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').trim()).replace(/^\/+/, '') + '/'
+    if (path.split('/').filter(Boolean).some(badName)) { setToast({ msg: `“${input}” isn't a valid folder name.` }); return }
+    if (w.dirs?.includes(path)) { setToast({ msg: `${path} already exists.` }); return }
+    setFileDialog(null)
+    try {
+      if (!(await writable(w))) return
+      await createFolder(w.handle, path)
+      await reread(w, docRef.current.path)
+      setToast({ msg: `Created the folder ${path}` })
+    } catch (e) { setToast({ msg: 'Could not create the folder: ' + String((e as Error)?.message ?? e) }) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Rename or move a file or folder, and update the links that point at it (and the links inside it). */
+  const relocate = useCallback(async (from: string, toInput: string) => {
+    const w = wsRef.current
+    if (!w?.handle) return
+    const isDir = from.endsWith('/')
+    let to = toInput.replace(/\\/g, '/').replace(/^\/+/, '').trim()
+    if (isDir) to = to.replace(/\/*$/, '/')
+    else if (!/\.[^./]+$/.test(to) && /\.(md|markdown)$/i.test(from)) to += '.md'
+    if (to === from) { setFileDialog(null); return }
+    if (to.split('/').filter(Boolean).some(badName)) { setToast({ msg: `“${toInput}” isn't a valid name.` }); return }
+    if (isDir && to.startsWith(from)) { setToast({ msg: 'A folder can’t be moved into itself.' }); return }
+    const taken = isDir ? w.dirs?.includes(to) || [...w.files.keys()].some((p) => p.startsWith(to)) : w.files.has(to) || w.dirs?.includes(to + '/')
+    if (taken) { setToast({ msg: `${to} already exists.` }); return }
+    const unsaved = unsavedInFolder()
+    if (unsaved) { setToast({ msg: `Save your changes to ${unsaved} first (${keyLabel(KEYS.save)}).` }); return }
+    setFileDialog(null)
+    try {
+      if (!(await writable(w))) return
+      // Every file that moves, old path → new path.
+      const moves = new Map<string, string>()
+      for (const p of w.files.keys()) {
+        if (isDir ? p.startsWith(from) : p === from) moves.set(p, isDir ? to + p.slice(from.length) : to)
+      }
+      // Work out the new text of every file whose links change, before anything moves.
+      const { relinker } = await import('./relink')
+      const r = relinker(w, moves, rootFallback())
+      const names = [...moves.keys()].map((p) => p.split('/').pop()!.replace(/\.[^.]+$/, ''))
+      if (isDir) names.push(from.replace(/\/$/, '').split('/').pop()!)
+      const updates = new Map<string, string>()
+      let linkCount = 0
+      for (const p of w.docs) {
+        const moved = moves.get(p)
+        const newSelf = moved ?? p
+        // Only files that move to another folder, or that mention a moved name, can have links to fix.
+        const text = await (await w.files.get(p)!.get()).text()
+        if (!(moved && dirOf(moved) !== dirOf(p)) && !names.some((n) => text.includes(n))) continue
+        const out = r.rewrite(text, p, newSelf)
+        if (out.count) { updates.set(newSelf, out.text); linkCount += out.count }
+      }
+      await moveAt(w.handle, from, to)
+      for (const [p, text] of updates) await writeAt(w.handle, p, text)
+      const cur = docRef.current.path
+      await reread(w, cur ? moves.get(cur) ?? cur : undefined)
+      const verb = dirOf(from.replace(/\/$/, '')) === dirOf(to.replace(/\/$/, '')) ? 'Renamed' : 'Moved'
+      setToast({ msg: `${verb} ${from} to ${to}${updates.size ? ` · updated ${linkCount} link${linkCount === 1 ? '' : 's'} in ${updates.size} file${updates.size === 1 ? '' : 's'}` : ''}` })
+    } catch (e) {
+      setToast({ msg: 'Could not move it: ' + String((e as Error)?.message ?? e) })
+      reread(w, docRef.current.path).catch(() => {})
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const duplicate = useCallback(async (path: string) => {
+    const w = wsRef.current
+    const f = w?.files.get(path)
+    if (!w?.handle || !f) return
+    const m = /^(.*?)(\.[^./]+)?$/.exec(path)!
+    let copy = `${m[1]} copy${m[2] ?? ''}`
+    for (let n = 2; w.files.has(copy); n++) copy = `${m[1]} copy ${n}${m[2] ?? ''}`
+    try {
+      if (!(await writable(w))) return
+      await writeAt(w.handle, copy, await f.get())
+      await reread(w, docRef.current.path)
+      setToast({ msg: `Made ${copy}` })
+    } catch (e) { setToast({ msg: 'Could not copy it: ' + String((e as Error)?.message ?? e) }) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Delete a file or folder from the disk, after asking. */
+  const removeEntry = useCallback(async (path: string) => {
+    const w = wsRef.current
+    if (!w?.handle) return
+    const isDir = path.endsWith('/')
+    const inside = isDir ? [...w.files.keys()].filter((p) => p.startsWith(path)).length : 0
+    const what = isDir ? `the folder ${path}${inside ? ` and the ${inside.toLocaleString()} file${inside === 1 ? '' : 's'} in it` : ''}` : path
+    let ok = false
+    try { ok = window.confirm(`Delete ${what}?\n\nIt is deleted from your disk, not moved to the Recycle Bin or Trash.`) } catch { ok = false }
+    if (!ok) return
+    try {
+      if (!(await writable(w))) return
+      await removeAt(w.handle, path)
+      // Drafts of deleted files go too.
+      for (const k of [...draftsRef.current.keys()]) { const p = k.slice(k.indexOf(':') + 1); if (isDir ? p.startsWith(path) : p === path) draftsRef.current.delete(k) }
+      setDraftCount(draftsRef.current.size)
+      const cur = docRef.current.path
+      const gone = !!cur && (isDir ? cur.startsWith(path) : cur === path)
+      if (gone) setDoc((d) => ({ ...d, saved: d.text })) // nothing left to save it to
+      await reread(w, gone ? undefined : cur)
+      setToast({ msg: `Deleted ${path}` })
+    } catch (e) { setToast({ msg: 'Could not delete it: ' + String((e as Error)?.message ?? e) }) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const treeActions = useMemo<TreeActions | undefined>(() => canManage ? {
+    newFile: (dir) => setFileDialog({ kind: 'newFile', dir }),
+    newFolder: (dir) => setFileDialog({ kind: 'newFolder', dir }),
+    rename: (path) => setFileDialog({ kind: 'rename', path }),
+    move: (path) => setFileDialog({ kind: 'move', path }),
+    moveTo: (path, dir) => relocate(path, dir + path.replace(/\/$/, '').split('/').pop()! + (path.endsWith('/') ? '/' : '')),
+    duplicate,
+    remove: removeEntry,
+  } : undefined, [canManage, relocate, duplicate, removeEntry])
+
+  /* ---------- images: paste, drop or pick ---------- */
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const MAX_EMBED = 1_500_000
+  /** Save images next to the document (images/ in the opened folder), or embed them when there's no folder to save into. */
+  const addImages = useCallback(async (files: File[], at: number | null = null) => {
+    const api = edRef.current
+    const imgs = files.filter((f) => f.type.startsWith('image/'))
+    if (!api || !imgs.length) return
+    const d = docRef.current
+    const w = wsRef.current
+    const alt = (f: File) => {
+      const stem = f.name.replace(/\.[^.]+$/, '')
+      return /^(image|screenshot|clipboard|untitled|pasted.*)$/i.test(stem) || !stem ? 'image' : stem.replace(/[-_]+/g, ' ').trim()
+    }
+    const ext = (f: File) => (/\.([a-z0-9]+)$/i.exec(f.name)?.[1] ?? f.type.split('/')[1]?.replace('jpeg', 'jpg').replace('svg+xml', 'svg') ?? 'png').toLowerCase()
+    const parts: string[] = []
+    try {
+      if (w?.handle && d.path && isTopWindow) {
+        if (!(await writable(w))) return
+        const dir = dirOf(d.path) + 'images/'
+        const saved: string[] = []
+        for (const f of imgs) {
+          if (f.size > 25_000_000) { setToast({ msg: `${f.name} is over 25 MB, so it wasn't added.` }); continue }
+          const named = alt(f) !== 'image' && f.name
+          const now = new Date()
+          const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`
+          const base = (named ? f.name.replace(/\.[^.]+$/, '') : `image-${stamp}`).normalize('NFKD').replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-+|-+$/g, '') || 'image'
+          let name = `${base}.${ext(f)}`
+          for (let n = 2; w.files.has(dir + name); n++) name = `${base}-${n}.${ext(f)}`
+          const fh = await writeAt(w.handle, dir + name, f)
+          // Known to the folder at once, so the preview shows it without reading the folder again.
+          w.files.set(dir + name, { path: dir + name, name, kind: 'image', get: () => fh.getFile(), handle: fh })
+          parts.push(`![${alt(f)}](images/${encodeURIComponent(name).replace(/%2F/g, '/')})`)
+          saved.push(name)
+        }
+        if (!parts.length) return
+        api.insert(parts.join('\n\n'), at)
+        setToast({ msg: saved.length === 1 ? `Saved images/${saved[0]} next to ${d.name}` : `Saved ${saved.length} images in images/ next to ${d.name}` })
+        return
+      }
+      // No folder to save into: embed the image in the file itself, defined at the end so the text stays readable.
+      const used = new Set([...(api.getText().matchAll(/^\[(image-\d+)\]:/gm))].map((m) => m[1]))
+      const defs: string[] = []
+      let n = 1
+      for (const f of imgs) {
+        if (f.size > MAX_EMBED) { setToast({ msg: `${f.name || 'The image'} is too large to put inside the file (over 1.5 MB). Open the folder the file is in to save images next to it.` }); continue }
+        const url = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(r.error); r.readAsDataURL(f) })
+        while (used.has(`image-${n}`)) n++
+        used.add(`image-${n}`)
+        parts.push(`![${alt(f)}][image-${n}]`)
+        defs.push(`[image-${n}]: ${url}`)
+      }
+      if (!parts.length) return
+      api.insert(parts.join('\n\n'), at, defs)
+      setToast({ msg: canManage || !d.path ? 'Image added inside the file. To save images as separate files, open the file’s folder with Folder.' : 'Image added inside the file.' })
+    } catch (e) {
+      setToast({ msg: 'Could not add the image: ' + String((e as Error)?.message ?? e) })
+    }
+  }, [canManage]) // eslint-disable-line react-hooks/exhaustive-deps
+  addImagesRef.current = addImages
+  const pickImages = useCallback(() => {
+    if (layRef.current === 'preview') setLayout('split')
+    imageInputRef.current?.click()
+  }, [])
 
   const onEditorChange = useCallback((text: string, key: number) => {
     if (key !== docKeyRef.current) return
@@ -1097,6 +1323,7 @@ export default function App() {
   }
   /** Run an editor command from the menu bar or the toolbar. */
   const exec = useCallback((id: string) => {
+    if (id === 'pickImage') { pickImages(); return }
     const api = edRef.current
     if (!api) return
     if (layRef.current === 'preview') setLayout('split')
@@ -1213,9 +1440,10 @@ export default function App() {
           ],
         },
         {
-          label: 'New file in folder…', run: () => setNameDialog(dirOf(doc.path ?? '') + 'untitled.md'), disabled: !canFolderFile,
+          label: 'New file in folder…', run: () => setFileDialog({ kind: 'newFile', dir: dirOf(doc.path ?? '') }), disabled: !canFolderFile,
           hint: canFolderFile ? undefined : ws ? 'Needs a folder opened in Chrome or Edge' : 'Open a folder first',
         },
+        { label: 'New folder…', icon: 'folderplus', run: () => setFileDialog({ kind: 'newFolder', dir: dirOf(doc.path ?? '') }), disabled: !canFolderFile },
         '-',
         { label: 'Open file…', icon: 'file', keys: KEYS.open, run: openFile },
         { label: 'Open folder…', icon: 'folder', keys: KEYS.openFolder, run: openFolder },
@@ -1223,6 +1451,11 @@ export default function App() {
         { label: 'Save', icon: 'save', keys: KEYS.save, run: () => save(false) },
         { label: 'Save as…', keys: KEYS.saveAs, run: () => save(true) },
         { label: 'Download .md', icon: 'download', run: exportMd, disabled: !isTopWindow },
+        '-',
+        { label: 'Rename file…', icon: 'edit', run: () => doc.path && setFileDialog({ kind: 'rename', path: doc.path }), disabled: !canFolderFile || !doc.path },
+        { label: 'Move file…', icon: 'move', run: () => doc.path && setFileDialog({ kind: 'move', path: doc.path }), disabled: !canFolderFile || !doc.path },
+        { label: 'Duplicate file', icon: 'copy', run: () => doc.path && duplicate(doc.path), disabled: !canFolderFile || !doc.path },
+        { label: 'Delete file…', icon: 'trash', run: () => doc.path && removeEntry(doc.path), disabled: !canFolderFile || !doc.path },
         '-',
         { label: 'Export PDF', icon: 'pdf', keys: KEYS.print, run: exportPdf },
         { label: 'Export HTML', icon: 'code', run: exportHtml, disabled: !isTopWindow },
@@ -1274,7 +1507,9 @@ export default function App() {
     {
       label: 'Insert',
       items: [
-        ed('Link', 'link', { icon: 'link' }), ed('Link reference', 'linkRef'), ed('Image', 'image', { icon: 'image' }), ed('Footnote', 'footnote'),
+        ed('Link', 'link', { icon: 'link' }), ed('Link reference', 'linkRef'),
+        { label: 'Image from your computer…', icon: 'image', run: pickImages, hint: 'Or paste or drop an image' },
+        ed('Image link', 'image'), ed('Footnote', 'footnote'),
         '-',
         {
           label: 'Table', icon: 'table', sub: [[2, 2], [3, 3], [4, 4], [5, 6]].map(([c, r]) => ed(`${c} columns × ${r} rows`, `table:${c}x${r + 1}`)),
@@ -1342,7 +1577,7 @@ export default function App() {
       { id: 'strike', icon: 'strike', label: 'Strikethrough', keys: KEYS.strike }, { id: 'code', icon: 'inline', label: 'Inline code', keys: KEYS.code },
     ],
     [
-      { id: 'link', icon: 'link', label: 'Link', keys: KEYS.link }, { id: 'image', icon: 'image', label: 'Image', keys: KEYS.image },
+      { id: 'link', icon: 'link', label: 'Link', keys: KEYS.link }, { id: 'pickImage', icon: 'image', label: 'Image (or paste / drop one)' },
       { id: 'table:3x3', icon: 'table', label: 'Table', keys: KEYS.table },
     ],
     [
@@ -1390,11 +1625,11 @@ export default function App() {
     <>
       {ws && (
         <FolderPanel
-          key={ws.id}
+          key={panelKey}
           ws={ws} current={doc.path} query={query} onQuery={setQuery} scan={scan} indexing={indexing}
           filters={filters} onFilters={setFilters}
           searchRef={searchRef} onClose={() => { if (!okToLeave(true)) return; closeFolder(); if (doc.path) goHome(true) }}
-          onOpen={openFromPanel}
+          onOpen={openFromPanel} actions={treeActions}
         />
       )}
       {isHome && recentPanel}
@@ -1530,6 +1765,7 @@ export default function App() {
               <Editor
                 key={docKey} docKey={docKey} initial={doc.text} wrap={wrap} lineNumbers={lineNums}
                 onChange={onEditorChange} onReady={onEditorReady} onScroll={onEditorScroll} onCursor={setCursor}
+                onFiles={(f) => addImagesRef.current(f)}
               />
             </Suspense>
           </section>
@@ -1619,21 +1855,47 @@ export default function App() {
       {dragging && (
         <div className="drop" aria-hidden="true">
           <div className="drop-box">
-            <Icon name="open" />
-            <strong>Drop to open</strong>
-            <span>a .md file, a folder or a .zip bundle</span>
+            <Icon name={dragging === 'image' ? 'image' : 'open'} />
+            <strong>{dragging === 'image' ? 'Drop to add the image' : 'Drop to open'}</strong>
+            <span>{dragging === 'image'
+              ? (ws?.handle && doc.path ? `Saved in images/ next to ${doc.name}` : 'Put inside the file (open its folder to save images separately)')
+              : 'a .md file, a folder or a .zip bundle'}</span>
           </div>
         </div>
       )}
 
       {keysOpen && <ShortcutsDialog menus={menus} onClose={() => setKeysOpen(false)} />}
-      {nameDialog !== null && (
+      {fileDialog?.kind === 'newFile' && (
         <NameDialog
           title={`New file in ${ws?.name ?? 'the folder'}`}
           note="A path inside the folder. Folders in the path are created if they don't exist."
-          initial={nameDialog} action="Create" onClose={() => setNameDialog(null)} onSubmit={createInFolder}
+          initial={fileDialog.dir + 'untitled.md'} action="Create" onClose={() => setFileDialog(null)} onSubmit={createInFolder}
         />
       )}
+      {fileDialog?.kind === 'newFolder' && (
+        <NameDialog
+          title="New folder" note={`Inside ${fileDialog.dir || ws?.name + '/'}`}
+          initial="new-folder" action="Create" onClose={() => setFileDialog(null)} onSubmit={(v) => createFolderAt(v, fileDialog.dir)}
+        />
+      )}
+      {fileDialog?.kind === 'rename' && (
+        <NameDialog
+          title={fileDialog.path.endsWith('/') ? 'Rename folder' : 'Rename file'}
+          note="Links to it in other files are updated. You can also type a new path to move it."
+          initial={fileDialog.path.replace(/\/$/, '')} action="Rename" onClose={() => setFileDialog(null)}
+          onSubmit={(v) => relocate(fileDialog.path, v)}
+        />
+      )}
+      {fileDialog?.kind === 'move' && ws && (
+        <MoveDialog
+          path={fileDialog.path} root={ws.name} dirs={ws.dirs ?? []} onClose={() => setFileDialog(null)}
+          onSubmit={(dir) => relocate(fileDialog.path, dir + fileDialog.path.replace(/\/$/, '').split('/').pop()! + (fileDialog.path.endsWith('/') ? '/' : ''))}
+        />
+      )}
+      <input
+        ref={imageInputRef} type="file" hidden multiple accept="image/*"
+        onChange={(e) => { const f = Array.from(e.target.files ?? []); e.target.value = ''; if (f.length) addImages(f) }}
+      />
 
       {pasteOpen && <PasteDialog onClose={() => setPasteOpen(false)} onSubmit={(text) => { setPasteOpen(false); if (okToLeave(false)) replaceDoc({ name: 'pasted.md', text }, 'Showing pasted Markdown') }} />}
 

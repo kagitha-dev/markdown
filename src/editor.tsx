@@ -32,6 +32,10 @@ export interface EditorApi {
   focus(): void
   /** Re-measure after being hidden. */
   refresh(): void
+  /** Insert text at a position (or the selection), on its own if it's a block, plus definitions at the end of the document. */
+  insert(text: string, at: number | null, defs?: string[]): void
+  /** The document position at a point on screen, if the point is over the text. */
+  posAt(x: number, y: number): number | null
 }
 
 export interface CursorInfo { line: number; col: number; text: string; selected: number }
@@ -46,6 +50,8 @@ interface Props {
   onReady: (api: EditorApi | null) => void
   onScroll: () => void
   onCursor: (c: CursorInfo) => void
+  /** Images pasted into the editor. */
+  onFiles: (files: File[]) => void
 }
 
 const today = () => {
@@ -238,7 +244,16 @@ export default function Editor(p: Props) {
           ])),
           keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
           EditorView.domEventHandlers({
+            // Dropped files are handled by the app (images are saved or embedded); never inserted as text here.
+            drop(e) { return !!e.dataTransfer?.files.length },
             paste(e, v) {
+              // A copied image (screenshot, image from a web page) with no text alongside it.
+              const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'))
+              if (files.length && !e.clipboardData?.getData('text/plain').trim()) {
+                e.preventDefault()
+                props.current.onFiles(files)
+                return true
+              }
               const text = e.clipboardData?.getData('text/plain')
               if (text && md.pasteLink(v, text)) { e.preventDefault(); return true }
               return false
@@ -283,6 +298,31 @@ export default function Editor(p: Props) {
       },
       focus: () => view.focus(),
       refresh: () => view.requestMeasure(),
+      insert(text, at, defs = []) {
+        const { state } = view
+        const sel = state.selection.main
+        const from = at ?? sel.from
+        const to = at ?? sel.to
+        const line = state.doc.lineAt(from)
+        // Images go on their own line(s) unless they're dropped into the middle of text.
+        const prevLine = line.number > 1 ? state.doc.line(line.number - 1).text : ''
+        const before = from > line.from && state.sliceDoc(from - 1, from).trim() ? '\n\n'
+          : from === line.from && !line.text.trim() && prevLine.trim() ? '\n' : ''
+        const after = to < line.to && state.sliceDoc(to, to + 1).trim() ? '\n\n' : ''
+        const insert = before + text + after
+        const changes: { from: number; to?: number; insert: string }[] = [{ from, to, insert }]
+        if (defs.length) {
+          const d = md.appendDefinition(state, defs.join('\n'))
+          changes.push({ from: d.from, insert: d.insert })
+        }
+        view.dispatch({ changes, selection: { anchor: from + before.length + text.length }, scrollIntoView: true, userEvent: 'input.paste' })
+        view.focus()
+      },
+      posAt: (x, y) => {
+        const r = view.scrollDOM.getBoundingClientRect()
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null
+        return view.posAtCoords({ x, y })
+      },
     }
     props.current.onReady(api)
     reportCursor(view)

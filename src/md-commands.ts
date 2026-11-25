@@ -344,7 +344,7 @@ export const image: Cmd = (view) => {
 }
 
 /** Append a definition at the end of the document (after a blank line) and return its position. */
-function appendDefinition(state: EditorState, def: string) {
+export function appendDefinition(state: EditorState, def: string) {
   const end = state.doc.length
   const text = state.doc.toString()
   const sep = !text ? '' : text.endsWith('\n\n') ? '' : text.endsWith('\n') ? '\n' : '\n\n'

@@ -15,6 +15,8 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
   - **Save** (Ctrl/Cmd+S) writes back to the file in Chrome and Edge, including files in an opened folder; **Save as** (Ctrl/Cmd+Shift+S) picks a place. Other browsers download a copy.
   - Unsaved changes to other files in a folder are kept while you move between files; the browser asks before closing a tab or opening something else over unsaved work
   - New documents are kept in the browser until saved
+  - **Images**: paste a screenshot, drop an image on the editor, or use Insert → Image from your computer. With a folder open (Chrome, Edge) the image is saved in `images/` next to the document and linked; otherwise it's embedded in the file as a data URL defined at the end, so the text stays readable.
+- **Manage files in an opened folder** (Chrome and Edge): New file, New folder, Rename, Move to…, Duplicate and Delete from the `⋯` button or right-click in the file tree, the buttons at the top of the folder panel, or the File menu. Drag files and folders onto a folder to move them. Renaming or moving updates links in every file that points there (Markdown links, images, reference definitions, raw HTML and front matter paths such as `superseded_by`), and relative links inside the moved files. Delete asks first and removes from disk (not the Recycle Bin or Trash).
 - GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) render as coloured callouts
 - Open a file by drag-and-drop, the **Open** button (Ctrl/Cmd+O) or **Paste** (Ctrl/Cmd+Shift+V)
 - **Find in the open file** with the search button or Ctrl/Cmd+F: every match highlighted, a count, Enter / Shift+Enter to step through (also in Source view; a second Ctrl/Cmd+F opens the browser's own search)
@@ -91,6 +93,7 @@ src/
   edit-menu.tsx         menu bar, toolbar, keyboard-shortcuts and file-name dialogs
   edit-keys.ts          editor keyboard shortcuts (shared by the keymap and the menus)
   code-languages.ts     languages highlighted inside code blocks in the editor
+  relink.ts             rewrites links when files or folders are renamed or moved (loaded on demand)
   markdown.ts           unified pipeline and Shiki setup (loaded on demand)
   frontmatter.ts        YAML frontmatter parsing and word count
   workspace.ts          opened folders: reading, path resolution, image blob URLs

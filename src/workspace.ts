@@ -22,6 +22,10 @@ export interface Workspace {
   source?: 'zip'
   /** True when the folder had more than MAX_FILES files and only the first were read. */
   truncated: boolean
+  /** Every folder inside (with a trailing slash), for folders opened with the File System Access API. */
+  dirs?: string[]
+  /** Folders with nothing in them, so they still show in the tree. */
+  emptyDirs?: string[]
 }
 
 const MD_RE = /\.(md|markdown|mdown|mkd|mdx|txt)$/i
@@ -120,33 +124,107 @@ export async function pickOpenFile(): Promise<FileSystemFileHandle | null> {
   }
 }
 
-/** Create a new file (and any folders on its path) inside an opened folder. */
-export async function createFileIn(root: FileSystemDirectoryHandle, path: string, text: string): Promise<FileSystemFileHandle> {
-  const parts = path.split('/').filter(Boolean)
-  const name = parts.pop()!
+/* ---------- changing files in an opened folder ---------- */
+
+const baseOf = (path: string) => path.replace(/\/$/, '').split('/').pop()!
+
+/** The folder at `dirPath` ("docs/notes/" or ""), created if asked. */
+export async function dirAt(root: FileSystemDirectoryHandle, dirPath: string, create = false): Promise<FileSystemDirectoryHandle> {
   let dir = root
-  for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true })
-  const h = await dir.getFileHandle(name, { create: true })
-  await writeFile(h, text)
+  for (const p of dirPath.split('/').filter(Boolean)) dir = await dir.getDirectoryHandle(p, { create })
+  return dir
+}
+
+export async function existsAt(root: FileSystemDirectoryHandle, path: string): Promise<boolean> {
+  const isDir = path.endsWith('/')
+  try {
+    const parent = await dirAt(root, dirOf(path.replace(/\/$/, '')))
+    if (isDir) await parent.getDirectoryHandle(baseOf(path))
+    else await parent.getFileHandle(baseOf(path))
+    return true
+  } catch { return false }
+}
+
+/** Write a file (and any folders on its path) inside an opened folder. */
+export async function writeAt(root: FileSystemDirectoryHandle, path: string, data: string | Blob): Promise<FileSystemFileHandle> {
+  const dir = await dirAt(root, dirOf(path), true)
+  const h = await dir.getFileHandle(baseOf(path), { create: true })
+  const w = await (h as any).createWritable()
+  await w.write(data)
+  await w.close()
   return h
 }
+export const createFileIn = writeAt
+
+export async function createFolder(root: FileSystemDirectoryHandle, path: string) {
+  await dirAt(root, path, true)
+}
+
+/** Delete a file, or a folder with everything in it. This can't be undone. */
+export async function removeAt(root: FileSystemDirectoryHandle, path: string) {
+  const parent = await dirAt(root, dirOf(path.replace(/\/$/, '')))
+  await parent.removeEntry(baseOf(path), { recursive: path.endsWith('/') })
+}
+
+async function copyDir(src: FileSystemDirectoryHandle, dst: FileSystemDirectoryHandle) {
+  for await (const entry of (src as any).values() as AsyncIterable<FileSystemHandle>) {
+    if (entry.kind === 'directory') await copyDir(entry as FileSystemDirectoryHandle, await dst.getDirectoryHandle(entry.name, { create: true }))
+    else {
+      const out = await dst.getFileHandle(entry.name, { create: true })
+      const w = await (out as any).createWritable()
+      await w.write(await (entry as FileSystemFileHandle).getFile())
+      await w.close()
+    }
+  }
+}
+
+/**
+ * Rename or move a file or folder ("a/b.md" → "c/d.md", "a/" → "c/a/").
+ * Uses the browser's move() where it works; otherwise copies everything (hidden files too) and deletes the original.
+ */
+export async function moveAt(root: FileSystemDirectoryHandle, from: string, to: string) {
+  const isDir = from.endsWith('/')
+  const parent = await dirAt(root, dirOf(from.replace(/\/$/, '')))
+  const h: any = isDir ? await parent.getDirectoryHandle(baseOf(from)) : await parent.getFileHandle(baseOf(from))
+  const target = await dirAt(root, dirOf(to.replace(/\/$/, '')), true)
+  if (typeof h.move === 'function') {
+    try { await h.move(target, baseOf(to)); return } catch { /* not supported here: copy instead */ }
+    if ((await existsAt(root, to)) && !(await existsAt(root, from))) return
+  }
+  if (isDir) await copyDir(h, await target.getDirectoryHandle(baseOf(to), { create: true }))
+  else {
+    const out = await target.getFileHandle(baseOf(to), { create: true })
+    const w = await (out as any).createWritable()
+    await w.write(await h.getFile())
+    await w.close()
+  }
+  await parent.removeEntry(baseOf(from), { recursive: isDir })
+}
+
+/** Characters that aren't allowed in file names on Windows, macOS or Linux. */
+export const badName = (name: string) => !name || name === '.' || name === '..' || /[<>:"|?*\\/\u0000-\u001f]/.test(name) || /[. ]$/.test(name)
 
 export async function fromDirectoryHandle(root: FileSystemDirectoryHandle): Promise<Workspace> {
   const files = new Map<string, WsFile>()
+  const dirs: string[] = []
+  const emptyDirs: string[] = []
   async function walk(dir: FileSystemDirectoryHandle, prefix: string) {
+    let any = false
     for await (const entry of (dir as any).values() as AsyncIterable<FileSystemHandle>) {
+      any = true
       if (files.size >= MAX_FILES) return
       if (entry.kind === 'directory') {
-        if (!skipDir(entry.name)) await walk(entry as FileSystemDirectoryHandle, prefix + entry.name + '/')
+        if (!skipDir(entry.name)) { dirs.push(prefix + entry.name + '/'); await walk(entry as FileSystemDirectoryHandle, prefix + entry.name + '/') }
       } else if (!entry.name.startsWith('.')) {
         const fh = entry as FileSystemFileHandle
         const path = prefix + entry.name
         files.set(path, { path, name: entry.name, kind: kindOf(entry.name), get: () => fh.getFile(), handle: fh })
       }
     }
+    if (!any && prefix) emptyDirs.push(prefix)
   }
   await walk(root, '')
-  return finish(root.name, files, root)
+  return { ...finish(root.name, files, root), dirs: dirs.sort(comparePaths), emptyDirs }
 }
 
 /* ---------- <input webkitdirectory> (Firefox, Safari) ---------- */

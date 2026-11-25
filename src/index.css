@@ -697,3 +697,26 @@ body.export .reading { padding-top: clamp(28px, 6vw, 72px); }
   .mb, .editor-pane { display: none !important; }
   .prose .markdown-alert { background: none; }
 }
+
+/* ---------- managing files in the tree ---------- */
+.folder-acts { display: flex; align-items: center; gap: 2px; flex: none; }
+.icon-btn { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.icon-btn:hover { background: var(--panel); color: var(--accent); }
+.icon-btn svg { width: 16px; height: 16px; }
+.tree-item { position: relative; display: flex; align-items: center; }
+.tree-item > .tree-row { flex: 1; }
+.tree--edit .tree-item > .tree-row { padding-right: 30px; }
+.tree-more { position: absolute; right: 3px; display: inline-grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
+.tree-more svg { width: 16px; height: 16px; }
+.tree-item:hover .tree-more, .tree-item:focus-within .tree-more, .tree-file[aria-current='page'] + .tree-more { opacity: 1; }
+.tree-more:hover { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--ink); }
+@media (hover: none) { .tree-more { opacity: 1; } }
+.tree-empty { padding: 4px 8px; font-size: 12.5px; font-style: italic; color: var(--muted); }
+.tree .is-drop > .tree-item > .tree-row, .tree.is-drop-root { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); border-radius: 6px; }
+.tree--edit { min-height: 40px; padding-bottom: 12px; }
+.tree-row[draggable='true'] { -webkit-user-drag: element; }
+.tree-menu { z-index: 60; min-width: 220px; }
+.mb-item.is-danger { color: var(--danger); }
+.mb-item.is-danger .mb-check svg { color: var(--danger); }
+select.name-input { height: auto; padding: 6px; font-family: var(--sans); }
+select.name-input option { padding: 5px 8px; border-radius: 5px; }

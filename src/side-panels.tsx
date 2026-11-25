@@ -1,5 +1,5 @@
 import { useMemo, useState, type RefObject } from 'react'
-import { FileTree } from './file-tree'
+import { FileTree, type TreeActions } from './file-tree'
 import { Icon } from './icons'
 import { activeCount, facetValues, matches, NO_TYPE, type Filters } from './filters'
 import { TIER_LABEL, type TrustTier } from './okf-core'
@@ -35,6 +35,8 @@ export function FolderPanel(props: {
   onOpen: (path: string, opts?: OpenOpts) => void
   onClose: () => void
   searchRef: RefObject<HTMLInputElement | null>
+  /** Present when files in the folder can be changed (Chrome and Edge). */
+  actions?: TreeActions
 }) {
   const { ws, current, query, scan, indexing, filters } = props
   const a = scan?.analysis ?? null
@@ -96,7 +98,7 @@ export function FolderPanel(props: {
   } else if (shownTab === 'checks') {
     body = a ? <Checks analysis={a} counts={counts} onOpen={props.onOpen} current={current} /> : <p className="panel-empty">Checking files…</p>
   } else {
-    body = <div className="tree-wrap"><FileTree paths={ws.docs} current={current} onOpen={(p) => props.onOpen(p)} /></div>
+    body = <div className="tree-wrap"><FileTree paths={ws.docs} current={current} onOpen={(p) => props.onOpen(p)} actions={props.actions} emptyDirs={ws.emptyDirs} /></div>
   }
 
   const problems = counts.error + counts.warning
@@ -107,7 +109,15 @@ export function FolderPanel(props: {
           <Icon name={ws.source === 'zip' ? 'archive' : 'folder'} /><span className="folder-name">{ws.name}</span>
           <span className="panel-count">{ws.docs.length}</span>
         </h2>
-        <button type="button" className="link-btn" onClick={props.onClose}>Close</button>
+        <div className="folder-acts">
+          {props.actions && (
+            <>
+              <button type="button" className="icon-btn" onClick={() => { setTab('files'); props.actions!.newFile('') }} title="New file" aria-label="New file"><Icon name="newfile" /></button>
+              <button type="button" className="icon-btn" onClick={() => { setTab('files'); props.actions!.newFolder('') }} title="New folder" aria-label="New folder"><Icon name="folderplus" /></button>
+            </>
+          )}
+          <button type="button" className="link-btn" onClick={props.onClose}>Close</button>
+        </div>
       </div>
 
       {a?.okf && (

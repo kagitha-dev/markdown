@@ -279,3 +279,37 @@ export function NameDialog({ title, note, initial, action, onClose, onSubmit }: 
     </div>
   )
 }
+
+/** Choose a folder to move a file or folder into. */
+export function MoveDialog({ path, root, dirs, onClose, onSubmit }: {
+  path: string; root: string; dirs: string[]; onClose: () => void; onSubmit: (dir: string) => void
+}) {
+  const isDir = path.endsWith('/')
+  const parent = path.replace(/[^/]+\/?$/, '')
+  // Not into itself, nor where it already is.
+  const options = ['', ...dirs].filter((d) => d !== parent && !(isDir && d.startsWith(path)))
+  const [v, setV] = useState(options[0] ?? '')
+  const ref = useRef<HTMLSelectElement>(null)
+  useEffect(() => { ref.current?.focus() }, [])
+  const name = path.replace(/\/$/, '').split('/').pop()
+  return (
+    <div className="drawer-scrim center" onClick={onClose}>
+      <form className="dialog dialog--name" role="dialog" aria-modal="true" aria-labelledby="move-h"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }}
+        onSubmit={(e) => { e.preventDefault(); if (options.length) onSubmit(v) }}>
+        <h2 id="move-h">Move {name}</h2>
+        <p>Links to it in other files are updated.</p>
+        {options.length ? (
+          <select ref={ref} className="name-input" value={v} onChange={(e) => setV(e.target.value)} aria-label="Move to folder" size={Math.min(10, Math.max(4, options.length))}>
+            {options.map((d) => <option key={d} value={d}>{d ? `${root}/${d}` : `${root} (top level)`}</option>)}
+          </select>
+        ) : <p>There's no other folder to move it to. Make one with New folder first.</p>}
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn--primary" disabled={!options.length}>Move</button>
+        </div>
+      </form>
+    </div>
+  )
+}
