@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { FmValue, Frontmatter } from './markdown'
+import type { FmValue, Frontmatter } from './frontmatter'
 
 const OKF_HINT = 'OKF uses `type` as its one required field'
 

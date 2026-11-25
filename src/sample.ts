@@ -5,7 +5,7 @@ type: guide
 title: kagitha Markdown Viewer
 description: A free, private Markdown viewer with YAML frontmatter and Open Knowledge Format support.
 author: Prasad Kagitha
-updated: 2026-11-24
+updated: 2026-11-25
 status: beta
 tags: [markdown, frontmatter, okf]
 related:
@@ -17,7 +17,7 @@ related:
 
 Open a \`.md\` file and read it as a clean, formatted page. Your file is **opened in your browser and never uploaded**: there is no server, no account and no tracking.
 
-> **Try it:** drop a \`.md\` file onto this window, press **Open**, or paste Markdown with **Paste**.
+> **Try it:** drop a \`.md\` file onto this window, press **Open**, or paste Markdown with **Paste**. To read a whole set of notes, open a **Folder**.
 
 The panel beside this page reads the YAML frontmatter at the top of the file and shows it as a tidy card. If a file uses Google's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF), its \`type\` field is highlighted.
 
@@ -32,11 +32,23 @@ The panel beside this page reads the YAML frontmatter at the top of the file and
 | Footnotes | \`[^1]\` | ✓ |
 | Raw HTML | sanitized, scripts removed | ✓ |
 
+## Whole folders
+
+Press **Folder** (or drop a folder onto this window) to open a set of notes, docs or a wiki:
+
+- A **file tree** in the side panel, with the folder's \`index.md\` or \`README.md\` shown first
+- **Links between files** work, including \`../other.md#a-heading\`, and the browser's Back and Forward buttons move between them
+- **Images** with relative paths, such as \`![diagram](img/flow.png)\`, are shown from the folder
+- **Search across every file** (Ctrl/Cmd+K), with the matching words highlighted
+
+Recent files and folders are listed on this page, and are kept only in your browser. The viewer can also be **installed as an app** that works offline.
+
 ### Roadmap
 
 - [x] Single-file viewer with frontmatter card
 - [x] Light and dark themes
-- [ ] Open whole folders
+- [x] Open whole folders, with search across files
+- [x] Installable app that works offline
 - [ ] OKF bundle validator and graph view
 
 ## Code
@@ -77,7 +89,7 @@ flowchart LR
 
 ## Privacy
 
-Everything happens in your browser. The fonts, the code highlighter and the diagram renderer are all served from this site, so opening a file makes no requests to anyone else. You can check this in your browser's developer tools, on the Network tab.
+Everything happens in your browser. Folders are read straight from your disk and nothing is copied anywhere. The fonts, the code highlighter and the diagram renderer are all served from this site, so opening a file makes no requests to anyone else. You can check this in your browser's developer tools, on the Network tab.
 
 ## Notes
 

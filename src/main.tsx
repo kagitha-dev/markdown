@@ -12,3 +12,9 @@ import './index.css'
 import App from './App'
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>)
+
+// Offline support and installing as an app. Not in embedded previews or the single-file build.
+const topWindow = (() => { try { return window.self === window.top } catch { return false } })()
+if (import.meta.env.PROD && import.meta.env.MODE !== 'single' && topWindow && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}) })
+}

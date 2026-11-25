@@ -1,4 +1,4 @@
-import type { FmValue } from './markdown'
+import type { FmValue } from './frontmatter'
 
 /* ---------- helpers ---------- */
 
@@ -64,6 +64,18 @@ export function cleanArticle(article: HTMLElement): HTMLElement {
   return copy
 }
 
+/* ---------- images from an opened folder ---------- */
+
+/** Images from a folder are shown with blob: URLs that only live in this tab, so embed them. */
+async function inlineImages(root: HTMLElement) {
+  await Promise.all(
+    Array.from(root.querySelectorAll<HTMLImageElement>('img[src^="blob:"]')).map(async (img) => {
+      try { img.src = await toDataUrl(await (await fetch(img.src)).blob()) } catch { /* leave as is */ }
+      img.removeAttribute('data-local-src')
+    }),
+  )
+}
+
 /* ---------- styles with fonts inlined ---------- */
 
 function toDataUrl(blob: Blob): Promise<string> {
@@ -125,6 +137,7 @@ export async function buildStandaloneHtml(opts: {
   meta: string
 }): Promise<string> {
   const body = cleanArticle(opts.article)
+  await inlineImages(body)
   const css = await collectCss({ math: !!body.querySelector('.katex') })
   const desc = opts.description ? `<meta name="description" content="${escapeHtml(opts.description)}">` : ''
   return `<!DOCTYPE html>
@@ -154,6 +167,7 @@ export async function copyRich(article: HTMLElement, meta: string) {
   const body = cleanArticle(article)
   body.querySelectorAll('.anchor, .code-bar, .mermaid-block').forEach((n) => n.remove())
   body.querySelectorAll('.katex-mathml').forEach((n) => n.remove())
+  await inlineImages(body)
   const html = `${meta}${body.innerHTML}`
   const text = body.innerText || body.textContent || ''
   if ('ClipboardItem' in window && navigator.clipboard?.write) {

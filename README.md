@@ -4,9 +4,16 @@ A free, private Markdown viewer that runs entirely in the browser: **https://mar
 
 Files are opened in your browser and never uploaded. Fonts, the code highlighter and the diagram renderer are bundled with the app, so it makes no third-party requests.
 
-## Features (v1)
+## Features
 
 - Open a file by drag-and-drop, the **Open** button (Ctrl/Cmd+O) or **Paste** (Ctrl/Cmd+Shift+V)
+- **Open a whole folder** with the **Folder** button (Ctrl/Cmd+Shift+O) or by dropping it on the window. Chrome and Edge use the File System Access API; other browsers use a folder picker.
+  - File tree in the side panel; the folder's `index.md` or `README.md` opens first
+  - Links between files work (`../other.md#heading`, folder links, links without `.md`), and Back/Forward move between files
+  - Images with relative paths are shown from the folder (and embedded in HTML exports)
+  - Search across every file (Ctrl/Cmd+K) with MiniSearch, matches highlighted in the page
+- **Recent files and folders** on the home page, kept in IndexedDB in your browser only. Folders opened in Chrome or Edge can be reopened in one click.
+- **Installable app that works offline** (service worker via vite-plugin-pwa). Installed in Chrome or Edge, it can open `.md` files from the desktop.
 - GitHub Flavored Markdown: tables, task lists, strikethrough, footnotes, autolinks
 - Code highlighting (Shiki, 20+ languages) with copy buttons
 - Math with KaTeX (`$inline$`, `$$block$$`)
@@ -23,6 +30,7 @@ Files are opened in your browser and never uploaded. Fonts, the code highlighter
   - Optional frontmatter table at the top of PDF, HTML and formatted-text exports
 - Raw HTML is sanitized, so scripts and `javascript:` links are removed
 - The last document and theme are remembered in the browser
+- The Markdown pipeline loads separately from the app shell (main bundle about 375 kB instead of 1.1 MB)
 
 ## Develop
 
@@ -51,16 +59,22 @@ Or deploy from the command line: `npm i -g vercel && vercel --prod`.
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Local dev server |
-| `npm run build` | Production build into `dist/` (what Vercel runs) |
+| `npm run build` | Production build into `dist/` with the service worker (what Vercel runs) |
 | `npm run build:single` | One self-contained HTML file in `dist-single/` |
 
 ## Project layout
 
 ```
-public/               og.png (social preview), robots.txt, sitemap.xml
+public/               og.png (social preview), app icons, robots.txt, sitemap.xml
 src/
-  App.tsx               toolbar, layout, file loading, outline, diagrams
-  markdown.ts           unified pipeline, frontmatter parsing, Shiki setup
+  App.tsx               toolbar, layout, file and folder loading, history, outline, diagrams
+  markdown.ts           unified pipeline and Shiki setup (loaded on demand)
+  frontmatter.ts        YAML frontmatter parsing and word count
+  workspace.ts          opened folders: reading, path resolution, image blob URLs
+  file-tree.tsx         the folder tree
+  side-panels.tsx       folder panel (tree + search results) and Recent panel
+  search.ts             MiniSearch index across a folder (loaded on demand)
+  recent.ts             recent files and folders in IndexedDB
   frontmatter-card.tsx  metadata card and YAML error view
   export.ts             HTML/Markdown export, font inlining, rich-text copy
   export-menu.tsx       the Export dropdown
@@ -71,5 +85,4 @@ src/
 
 ## Next
 
-- v2: open folders, links between files, search, installable PWA
 - v3: OKF bundle validator, graph view, frontmatter filters, open .zip bundles
