@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { docStats, extractFrontmatter } from './frontmatter'
 import { FrontmatterCard } from './frontmatter-card'
 import { FolderPanel, RecentPanel } from './side-panels'
@@ -14,6 +14,7 @@ import {
 } from './workspace'
 import { SAMPLE, SAMPLE_NAME } from './sample'
 import { Icon } from './icons'
+import { headOf, render } from './renderer'
 import { baseName, buildStandaloneHtml, copyRich, downloadBlob, escapeHtml, metaHtml } from './export'
 import { ExportMenu } from './export-menu'
 
@@ -23,8 +24,6 @@ interface Doc { name: string; text: string; /** path inside the opened folder */
 /** History entries for opened files. depth counts entries since home; ws + path identify a file in a folder. */
 interface HistState { kmvFile: true; depth: number; ws?: number; path?: string }
 
-/* The Markdown pipeline (unified, Shiki, KaTeX) is the largest part of the app, so it loads separately. */
-const md = () => import('./markdown')
 const isLocalUrl = (u: string) => !!u && !u.startsWith('#') && !/^[a-z][a-z0-9+.-]*:/i.test(u) && !u.startsWith('//')
 const histState = (): HistState | null => { try { return history.state?.kmvFile ? history.state : null } catch { return null } }
 interface TocItem { id: string; text: string; level: number }
@@ -93,9 +92,23 @@ async function renderMermaid(root: HTMLElement, dark: boolean) {
 /** Scroll only the reading pane, never the page around it. */
 function scrollPaneTo(pane: HTMLElement | null, target: HTMLElement | null, smooth = true) {
   if (!pane || !target) return
-  const top = target.getBoundingClientRect().top - pane.getBoundingClientRect().top + pane.scrollTop - 20
+  const offset = () => target.getBoundingClientRect().top - pane.getBoundingClientRect().top - 20
+  // Long pages skip layout for off-screen parts, so sizes are estimates until they're drawn:
+  // jump, let the browser draw, then correct until the target stays put.
+  if (pane.querySelector('.prose--big')) {
+    let tries = 0, still = 0
+    const step = () => {
+      const d = offset()
+      if (Math.abs(d) < 2) still++
+      else { still = 0; pane.scrollTop += d }
+      // Stop once it has stayed in place for a few frames (newly drawn parts can still shift it).
+      if (still < 4 && tries++ < 30) requestAnimationFrame(step)
+    }
+    step()
+    return
+  }
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  pane.scrollTo({ top, behavior: smooth && !reduce ? 'smooth' : 'auto' })
+  pane.scrollTo({ top: offset() + pane.scrollTop, behavior: smooth && !reduce ? 'smooth' : 'auto' })
 }
 
 /** The element a #fragment points at (footnotes and raw HTML ids get a user-content- prefix). */
@@ -192,7 +205,14 @@ export default function App() {
   viewRef.current = view
   const [html, setHtml] = useState('')
   const [srcHtml, setSrcHtml] = useState('')
-  const [rendering, setRendering] = useState(true)
+  /** The text that `html` / `srcHtml` were made from; when it differs from the open file, it's still rendering. */
+  const [htmlFor, setHtmlFor] = useState<string | null>(null)
+  const [srcFor, setSrcFor] = useState<string | null>(null)
+  /** Set while only the first part of a long file is shown. */
+  const [peekFor, setPeekFor] = useState<string | null>(null)
+  const [showLoader, setShowLoader] = useState(false)
+  const htmlForRef = useRef(htmlFor)
+  htmlForRef.current = htmlFor
   const [toc, setToc] = useState<TocItem[]>([])
   const [activeId, setActiveId] = useState('')
   const [drawer, setDrawer] = useState(false)
@@ -226,6 +246,9 @@ export default function App() {
 
   const fm = useMemo(() => extractFrontmatter(doc.text), [doc.text])
   const stats = useMemo(() => docStats(doc.text), [doc.text])
+  const lineCount = useMemo(() => doc.text.split('\n').length, [doc.text])
+  /** Very long rendered pages skip layout for the parts that are off screen. */
+  const bigDoc = (htmlFor?.length ?? 0) > 200_000
   const title = (typeof fm?.data?.title === 'string' && fm.data.title) || doc.name
 
   /* theme class + persistence */
@@ -236,27 +259,55 @@ export default function App() {
   useEffect(() => { if (doc.text.length < MAX_SAVE) store.set('kmv.doc', doc) }, [doc])
   useEffect(() => { document.title = `${title} · kagitha Markdown Viewer` }, [title])
 
-  /* render markdown (debounced) */
+  /* Render in a background worker (debounced), so large files don't freeze the page. */
   useEffect(() => {
     let live = true
-    setRendering(true)
+    const text = doc.text
     const t = setTimeout(async () => {
+      // Long files: show the opening part first, then the whole file when it's ready.
+      const head = headOf(text)
+      if (head) render('peek', head).then((out) => { if (live) { setHtml((cur) => (htmlForRef.current === text ? cur : out)); setPeekFor(text) } }, () => {})
       try {
-        const out = await (await md()).renderMarkdown(doc.text)
-        if (live) setHtml(out)
+        const out = await render('preview', text)
+        if (live) { setHtml(out); setHtmlFor(text); setPeekFor(null) }
       } catch (e) {
-        if (live) setHtml(`<p class="render-error">Could not render this file: ${escapeHtml(String(e))}</p>`)
-      } finally { if (live) setRendering(false) }
-    }, 60)
+        if ((e as DOMException)?.name === 'AbortError') return
+        if (live) { setHtml(`<p class="render-error">Could not render this file: ${escapeHtml(String(e))}</p>`); setHtmlFor(text) }
+      }
+    }, 40)
     return () => { live = false; clearTimeout(t) }
   }, [doc.text])
 
   useEffect(() => {
-    if (view !== 'source') return
+    if (view !== 'source' || srcFor === doc.text) return
     let live = true
-    md().then((m) => m.highlightSource(doc.text)).then((h) => live && setSrcHtml(h))
+    const text = doc.text
+    render('source', text).then((h) => { if (live) { setSrcHtml(h); setSrcFor(text) } }, () => {})
     return () => { live = false }
-  }, [view, doc.text])
+  }, [view, doc.text]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* A loading card for files that take a moment; small files render too fast to need one. */
+  const partial = view === 'preview' && htmlFor !== doc.text && peekFor === doc.text
+  const pendingView = view === 'source' ? srcFor !== doc.text : view === 'preview' && htmlFor !== doc.text && !partial
+  useEffect(() => {
+    if (!pendingView) { setShowLoader(false); return }
+    const t = setTimeout(() => setShowLoader(true), 180)
+    return () => clearTimeout(t)
+  }, [pendingView, doc.text])
+
+  /* Long pages: group the article into chunks the browser can skip drawing while they're off screen.
+     Runs before the first paint so the initial layout is cheap. */
+  useLayoutEffect(() => {
+    const el = articleRef.current
+    if (!el || view !== 'preview' || !bigDoc) return
+    const kids = Array.from(el.children)
+    for (let i = 0; i < kids.length; i += 40) {
+      const chunk = document.createElement('div')
+      chunk.className = 'cv-chunk'
+      kids[i].before(chunk)
+      chunk.append(...kids.slice(i, i + 40))
+    }
+  }, [html, view, bigDoc])
 
   /* after the article html changes: TOC, copy buttons, diagrams */
   useEffect(() => {
@@ -299,14 +350,17 @@ export default function App() {
     const root = mainRef.current
     if (!root || !toc.length) return
     let frame = 0
+    const heads = toc.map((t) => document.getElementById(t.id))
     const update = () => {
       frame = 0
       const limit = root.getBoundingClientRect().top + root.clientHeight * 0.25
-      let current = toc[0].id
-      for (const t of toc) {
-        const h = document.getElementById(t.id)
-        if (h && h.getBoundingClientRect().top <= limit) current = t.id
+      // Headings are in page order, so a binary search finds the last one above the line.
+      let lo = 0, hi = heads.length - 1, found = 0
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1
+        if ((heads[mid]?.getBoundingClientRect().top ?? Infinity) <= limit) { found = mid; lo = mid + 1 } else hi = mid - 1
       }
+      let current = toc[found].id
       if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) current = toc[toc.length - 1].id
       setActiveId(current)
     }
@@ -706,6 +760,11 @@ export default function App() {
     return (p: string) => { const d = docs.get(p); return !!d && matches(d, filters) }
   }, [scan, filters])
 
+  const onTocPick = useCallback((id: string) => {
+    setDrawer(false); setView('preview')
+    requestAnimationFrame(() => scrollPaneTo(mainRef.current, document.getElementById(id)))
+  }, [])
+
   const sidebar = (
     <>
       {ws && (
@@ -721,24 +780,10 @@ export default function App() {
       <FrontmatterCard fm={fm} />
       <nav className="panel" aria-labelledby="toc-h">
         <h2 id="toc-h" className="panel-h">Outline</h2>
-        {toc.length ? (
-          <ul className="toc">
-            {toc.map((t) => (
-              <li key={t.id} className={'toc-l' + t.level}>
-                <a
-                  href={'#' + t.id}
-                  className={t.id === activeId ? 'is-active' : ''}
-                  aria-current={t.id === activeId ? 'location' : undefined}
-                  onClick={(e) => {
-                    e.preventDefault(); setDrawer(false); setView('preview')
-                    requestAnimationFrame(() => scrollPaneTo(mainRef.current, document.getElementById(t.id)))
-                  }}
-                >
-                  {t.text}
-                </a>
-              </li>
-            ))}
-          </ul>
+        {showLoader ? (
+          <p className="panel-empty">Reading the file…</p>
+        ) : toc.length ? (
+          <TocList toc={toc} activeId={activeId} onPick={onTocPick} />
         ) : (
           <p className="panel-empty">No headings yet.</p>
         )}
@@ -821,6 +866,8 @@ export default function App() {
               <GraphView analysis={scan.analysis} current={doc.path} match={filterMatch} dark={dark} onOpen={(p) => { setView('preview'); openPath(p) }} />
             ) : <p className="graph-msg">Reading files{indexing ? ` (${indexing.done} of ${indexing.total})` : ''}…</p>
           ) : (
+          <>
+          {partial && <div className="top-progress" role="progressbar" aria-label={`Loading the rest of ${doc.name}`}><i /></div>}
           <main className="reading">
             {view === 'preview' && hasFm && (
               <div className="print-meta" dangerouslySetInnerHTML={{ __html: metaHtml(fm!.data) }} />
@@ -828,14 +875,24 @@ export default function App() {
             {view === 'preview' ? (
               <article
                 ref={articleRef}
-                className={'prose' + (rendering && !html ? ' is-loading' : '')}
+                className={'prose' + (!html ? ' is-loading' : '') + (showLoader ? ' is-stale' : '') + (bigDoc ? ' prose--big' : '')}
                 onClick={onArticleClick}
                 dangerouslySetInnerHTML={{ __html: html }}
               />
             ) : (
-              <div className="source" dangerouslySetInnerHTML={{ __html: srcHtml }} />
+              <div className={'source' + (showLoader ? ' is-stale' : '')} dangerouslySetInnerHTML={{ __html: srcHtml }} />
+            )}
+            {showLoader && (
+              <div className="loader" role="status" aria-live="polite">
+                <div className="loader-card">
+                  <strong>Opening {doc.name}</strong>
+                  <span>{lineCount.toLocaleString()} lines · {stats.words.toLocaleString()} words</span>
+                  <span className="loader-bar" aria-hidden="true"><i /></span>
+                </div>
+              </div>
             )}
           </main>
+          </>
           )}
         </div>
       </div>
@@ -843,7 +900,8 @@ export default function App() {
       <footer className="status">
         <span className="nowrap">{stats.words.toLocaleString()} words</span>
         <span className="nowrap">{stats.minutes} min read</span>
-        <span className="hide-sm">{doc.text.split('\n').length.toLocaleString()} lines</span>
+        <span className="hide-sm">{lineCount.toLocaleString()} lines</span>
+        {partial && <span className="nowrap status-busy" role="status">Loading the rest of the file…</span>}
         {ws && <span className="hide-sm nowrap">{ws.docs.length.toLocaleString()} files in {ws.name}</span>}
         {scan?.analysis.okf && <span className="hide-sm nowrap">OKF bundle{scan.analysis.okf.version ? ` v${scan.analysis.okf.version}` : ''}</span>}
         {installPrompt && (
@@ -890,6 +948,41 @@ export default function App() {
       )}
     </div>
   )
+}
+
+/**
+ * The outline. The list itself only re-renders when the headings change; the highlighted entry
+ * is updated directly, so long files with thousands of headings scroll smoothly.
+ */
+const TocItems = memo(function TocItems({ toc, onPick }: { toc: TocItem[]; onPick: (id: string) => void }) {
+  return (
+    <>
+      {toc.map((t) => (
+        <li key={t.id} className={'toc-l' + t.level}>
+          <a href={'#' + t.id} data-id={t.id} onClick={(e) => { e.preventDefault(); onPick(t.id) }}>{t.text}</a>
+        </li>
+      ))}
+    </>
+  )
+})
+function TocList({ toc, activeId, onPick }: { toc: TocItem[]; activeId: string; onPick: (id: string) => void }) {
+  const ref = useRef<HTMLUListElement>(null)
+  useEffect(() => {
+    const ul = ref.current
+    if (!ul) return
+    ul.querySelectorAll('a.is-active').forEach((a) => { a.classList.remove('is-active'); a.removeAttribute('aria-current') })
+    const a = activeId ? ul.querySelector<HTMLAnchorElement>(`a[data-id="${CSS.escape(activeId)}"]`) : null
+    if (!a) return
+    a.classList.add('is-active')
+    a.setAttribute('aria-current', 'location')
+    // Keep the highlighted entry visible in the sidebar without moving the page.
+    const box = ul.closest('.side, .drawer') as HTMLElement | null
+    if (box) {
+      const r = a.getBoundingClientRect(), b = box.getBoundingClientRect()
+      if (r.top < b.top + 40 || r.bottom > b.bottom - 20) box.scrollTop += r.top - b.top - b.height / 3
+    }
+  }, [activeId, toc])
+  return <ul className="toc" ref={ref}><TocItems toc={toc} onPick={onPick} /></ul>
 }
 
 function PasteDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (t: string) => void }) {
