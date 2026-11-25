@@ -5,6 +5,7 @@
 import { useEffect, useRef } from 'react'
 import { Compartment, EditorState, Prec } from '@codemirror/state'
 import {
+  Decoration, MatchDecorator, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate,
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor,
   rectangularSelection, crosshairCursor, placeholder,
 } from '@codemirror/view'
@@ -182,9 +183,38 @@ const theme = EditorView.theme({
   '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'color-mix(in srgb, #ff8c1a 60%, transparent)' },
   '.cm-matchingBracket': { backgroundColor: 'color-mix(in srgb, var(--accent) 16%, transparent)', outline: 'none' },
   '.cm-placeholder': { color: 'var(--muted)', fontStyle: 'normal' },
+  '.cm-data-chip': { display: 'inline-block', padding: '0 7px', borderRadius: '5px', background: 'var(--accent-soft)', color: 'var(--accent)', fontFamily: 'var(--sans)', fontSize: '12px', lineHeight: '1.6', verticalAlign: 'baseline' },
   '.cm-panels': { backgroundColor: 'var(--panel)', color: 'var(--ink)' },
   '.cm-panels-top': { borderBottom: '1px solid var(--line)' },
   '.cm-panels-bottom': { borderTop: '1px solid var(--line)' },
+})
+
+/* Images embedded in the file (data: URLs) are long runs of characters; show them as a small label instead. */
+class DataChip extends WidgetType {
+  constructor(readonly kind: string, readonly size: number) { super() }
+  eq(o: DataChip) { return o.kind === this.kind && o.size === this.size }
+  toDOM() {
+    const el = document.createElement('span')
+    el.className = 'cm-data-chip'
+    const kb = this.size * 0.75 / 1024
+    el.textContent = `${this.kind.toUpperCase()} image data · ${kb < 1024 ? Math.max(1, Math.round(kb)) + ' KB' : (kb / 1024).toFixed(1) + ' MB'}`
+    el.title = 'An image stored inside this file. Delete the whole line to remove it.'
+    return el
+  }
+  ignoreEvent() { return false }
+}
+const dataMatcher = new MatchDecorator({
+  regexp: /data:image\/([a-z0-9.+-]+);base64,[A-Za-z0-9+/=]{40,}/gi,
+  decoration: (m) => Decoration.replace({ widget: new DataChip(m[1].replace('svg+xml', 'svg').replace('jpeg', 'jpg'), m[0].length) }),
+})
+const dataChips = ViewPlugin.fromClass(class {
+  chips: DecorationSet
+  constructor(view: EditorView) { this.chips = dataMatcher.createDeco(view) }
+  update(u: ViewUpdate) { this.chips = dataMatcher.updateDeco(u, this.chips) }
+}, {
+  decorations: (v) => v.chips,
+  // The cursor steps over the whole thing, and deleting removes it in one go.
+  provide: (plugin) => EditorView.atomicRanges.of((view) => view.plugin(plugin)?.chips ?? Decoration.none),
 })
 
 export default function Editor(p: Props) {
@@ -234,6 +264,7 @@ export default function Editor(p: Props) {
           search({ top: true }),
           yamlFrontmatter({ content: markdown({ base: markdownLanguage, codeLanguages }) }),
           syntaxHighlighting(highlight),
+          dataChips,
           theme,
           placeholder('Start writing Markdown…  # for a heading, - for a list, or use the menus above.'),
           EditorView.contentAttributes.of({ 'aria-label': 'Markdown editor', spellcheck: 'true', autocorrect: 'off', autocapitalize: 'sentences' }),
@@ -308,14 +339,22 @@ export default function Editor(p: Props) {
         const prevLine = line.number > 1 ? state.doc.line(line.number - 1).text : ''
         const before = from > line.from && state.sliceDoc(from - 1, from).trim() ? '\n\n'
           : from === line.from && !line.text.trim() && prevLine.trim() ? '\n' : ''
-        const after = to < line.to && state.sliceDoc(to, to + 1).trim() ? '\n\n' : ''
+        // Text after the drop point moves below; at the end of a line the cursor goes to a fresh paragraph.
+        const atEnd = !state.sliceDoc(to, state.doc.lineAt(to).to).trim()
+        const after = '\n\n'
         const insert = before + text + after
-        const changes: { from: number; to?: number; insert: string }[] = [{ from, to, insert }]
+        let changes = state.changes({ from, to, insert })
+        let anchor = from + before.length + text.length + (atEnd ? after.length : 0)
         if (defs.length) {
-          const d = md.appendDefinition(state, defs.join('\n'))
-          changes.push({ from: d.from, insert: d.insert })
+          // Definitions go after everything, including what was just inserted (at the end of an empty document they'd join its line).
+          const next = state.update({ changes }).state
+          const d = md.appendDefinition(next, defs.join('\n'))
+          // Keep an empty paragraph for the cursor between the image and the definitions.
+          const more = next.changes({ from: d.from, insert: (d.from === anchor ? '\n\n' : '') + d.insert })
+          changes = changes.compose(more)
+          anchor = more.mapPos(anchor, -1)
         }
-        view.dispatch({ changes, selection: { anchor: from + before.length + text.length }, scrollIntoView: true, userEvent: 'input.paste' })
+        view.dispatch({ changes, selection: { anchor }, scrollIntoView: true, userEvent: 'input.paste' })
         view.focus()
       },
       posAt: (x, y) => {
