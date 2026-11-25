@@ -387,18 +387,12 @@ export default function Editor(p: Props) {
         // Text after the drop point moves below; at the end of a line the cursor goes to a fresh paragraph.
         const atEnd = !state.sliceDoc(to, state.doc.lineAt(to).to).trim()
         const after = '\n\n'
-        const insert = before + text + after
-        let changes = state.changes({ from, to, insert })
-        let anchor = from + before.length + text.length + (atEnd ? after.length : 0)
-        if (defs.length) {
-          // Definitions go after everything, including what was just inserted (at the end of an empty document they'd join its line).
-          const next = state.update({ changes }).state
-          const d = md.appendDefinition(next, defs.join('\n'))
-          // Keep an empty paragraph for the cursor between the image and the definitions.
-          const more = next.changes({ from: d.from, insert: (d.from === anchor ? '\n\n' : '') + d.insert })
-          changes = changes.compose(more)
-          anchor = more.mapPos(anchor, -1)
-        }
+        // An embedded image's data line goes right under it (one blank line between), so the two stay together
+        // and the cursor carries on below them.
+        const body = defs.length ? text + '\n\n' + defs.join('\n') : text
+        const insert = before + body + after
+        const changes = state.changes({ from, to, insert })
+        const anchor = from + before.length + (atEnd || defs.length ? body.length + after.length : text.length)
         view.dispatch({ changes, selection: { anchor }, scrollIntoView: true, userEvent: 'input.paste' })
         view.focus()
       },
