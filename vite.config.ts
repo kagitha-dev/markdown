@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig } from 'vite'
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -6,23 +6,13 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 import { VitePWA } from 'vite-plugin-pwa'
 
 /**
- * Two parser helpers ship a "browser" version that needs `document`, which a worker doesn't have.
- * Both also publish a "worker" version; use that inside the Markdown worker.
+ * Two parser helpers ship a "browser" version that needs `document`, which the Markdown worker
+ * doesn't have. Both also publish a version for workers; use it everywhere (dev server and build).
  */
-function workerConditions(): Plugin {
-  const pick = new Map([
-    ['decode-named-character-reference', 'decode-named-character-reference/index.js'],
-    ['hast-util-from-html-isomorphic', 'hast-util-from-html-isomorphic/index.js'],
-  ])
-  return {
-    name: 'kmv-worker-conditions',
-    enforce: 'pre',
-    async resolveId(id, importer) {
-      const to = pick.get(id)
-      return to ? this.resolve(fileURLToPath(new URL('./node_modules/' + to, import.meta.url)), importer, { skipSelf: true }) : null
-    },
-  }
-}
+const workerSafe = [
+  { find: /^decode-named-character-reference$/, replacement: fileURLToPath(new URL('./node_modules/decode-named-character-reference/index.js', import.meta.url)) },
+  { find: /^hast-util-from-html-isomorphic$/, replacement: fileURLToPath(new URL('./node_modules/hast-util-from-html-isomorphic/index.js', import.meta.url)) },
+]
 
 // `npm run build` -> normal multi-file build for Vercel, installable and offline (service worker)
 // `npm run build:single` -> one self-contained HTML file (used for the live preview), no service worker
@@ -80,7 +70,8 @@ export default defineConfig(({ mode }) => ({
         ]),
   ],
   // The Markdown worker keeps its languages in separate pieces (es); the single-file build needs one inline script (iife).
-  worker: { format: mode === 'single' ? 'iife' : 'es', plugins: () => [workerConditions()] },
+  worker: { format: mode === 'single' ? 'iife' : 'es' },
+  resolve: { alias: workerSafe },
   // Only lazy-loaded pieces (the diagram renderer's layout engines, the C++ grammar) are larger than this.
   build: mode === 'single' ? { outDir: 'dist-single', assetsInlineLimit: 100_000_000 } : { chunkSizeWarningLimit: 1600 },
 }))

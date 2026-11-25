@@ -54,7 +54,7 @@ function OkfSignals({ data }: { data: Record<string, FmValue> }) {
   const s = okfSignals(data)
   const hasTrust = 'verified' in data || 'generated' in data
   const rows: [string, React.ReactNode, string?][] = []
-  if (s.status || s.badStatus) rows.push(['Status', s.badStatus ? `${s.badStatus} (not a defined status)` : s.status, s.status === 'deprecated' ? 'warn' : s.status === 'draft' ? 'muted' : 'ok'])
+  if (s.status || s.badStatus) rows.push(['Status', s.badStatus ? `${s.badStatus} (not a defined status)` : s.status, s.badStatus || s.status === 'deprecated' ? 'warn' : s.status === 'draft' ? 'muted' : 'ok'])
   if (hasTrust || s.tier !== 'unverified')
     rows.push(['Trust', <>{TIER_LABEL[s.tier]}{s.lastVerified ? <span className="sig-sub">verified {relDate(s.lastVerified)}</span> : null}</>, s.tier === 'human' ? 'ok' : s.tier === 'outdated' ? 'warn' : 'muted'])
   if (s.staleAfter) rows.push([s.stale ? 'Stale' : 'Fresh until', s.stale ? <>since {relDate(s.staleAfter)}</> : relDate(s.staleAfter), s.stale ? 'warn' : 'ok'])

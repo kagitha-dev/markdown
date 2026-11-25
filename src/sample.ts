@@ -6,7 +6,7 @@ title: kagitha Markdown Viewer
 description: A free, private Markdown viewer with YAML frontmatter and Open Knowledge Format support.
 author: Prasad Kagitha
 updated: 2026-11-25
-status: beta
+status: draft
 tags: [markdown, frontmatter, okf]
 related:
   - getting-started.md

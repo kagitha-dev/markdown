@@ -58,9 +58,9 @@ function getWorker(): Promise<Worker | null> {
 const pendingText = new Map<number, string>()
 
 async function onPage(kind: Kind, text: string) {
-  // Only the single-file preview (which may run where workers are blocked) carries a second copy
-  // of the pipeline for the page itself; the real site always has workers.
-  if (import.meta.env.MODE !== 'single') throw new Error('the background renderer could not start. Reload the page to try again.')
+  // The production site always has workers, so only the dev server and the single-file preview
+  // (which may run where workers are blocked) carry a second copy of the pipeline for the page itself.
+  if (import.meta.env.PROD && import.meta.env.MODE !== 'single') throw new Error('the background renderer could not start. Reload the page to try again.')
   const m = await import('./markdown')
   return kind === 'source' ? m.highlightSource(text) : m.renderMarkdown(text)
 }
